@@ -1,0 +1,26 @@
+Sarah Jenkins
+Software Engineer
+Email: sarah.jenkins@devmail.net | Phone: +1-555-019-2834
+LinkedIn: linkedin.com/in/sarah-jenkins-dev | GitHub: github.com/sarahj-codes
+
+Summary:
+Full-stack software engineer with 5+ years of experience building scalable web applications using React, Node.js, and cloud services. Passionate about system design, frontend performance optimization, and AI integrations.
+
+Technical Skills:
+- Programming: TypeScript, JavaScript, Python, Go, HTML5, CSS3
+- Frameworks: React, Next.js, Express, NestJS, FastAPI
+- Databases & Cloud: PostgreSQL, MongoDB, Redis, AWS (S3, EC2, Lambda), Docker
+
+Professional Experience:
+Senior Software Engineer | CloudScale Inc. (2023 - Present)
+- Led the migration of a legacy monolithic dashboard to a Next.js micro-frontend architecture, improving page speed by 40%.
+- Designed and built a real-time analytics pipeline processing 5M+ daily events using Node.js and Redis.
+- Mentored 4 junior engineers and initiated code review guidelines.
+
+Full Stack Engineer | WebInnovate Corp (2021 - 2023)
+- Developed and maintained React user interfaces and RESTful APIs in Node.js.
+- Integrated Stripe payment gateways and third-party authentication services.
+
+Education:
+Bachelor of Science in Computer Science (GPA: 3.8/4.0)
+University of Washington, Seattle (Graduated 2021)

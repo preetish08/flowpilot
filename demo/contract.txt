@@ -1,0 +1,25 @@
+MUTUAL NON-DISCLOSURE AGREEMENT
+
+This Mutual Non-Disclosure Agreement ("Agreement") is entered into on August 6, 2026 ("Effective Date"), by and between:
+1. FlowPilot Corp, with its principal place of business at 500 Automation Blvd, Austin, TX 78701 ("FlowPilot"), and
+2. NovaScale Technologies Inc, with its principal place of business at 12 Plaza Center, Boston, MA 02108 ("NovaScale").
+
+FlowPilot and NovaScale may collectively be referred to as the "Parties" or individually as a "Party."
+
+1. Purpose. The Parties wish to explore a potential business relationship in connection with document processing automation (the "Relationship"). In connection with the Relationship, each Party may disclose to the other Party certain proprietary and confidential information.
+
+2. Confidential Information. "Confidential Information" means any information disclosed by one Party ("Disclosing Party") to the other Party ("Receiving Party") that is marked as confidential or should reasonably be understood to be confidential given the nature of the information.
+
+3. Term and Termination. This Agreement shall commence on the Effective Date and shall remain in effect for a period of one (1) year. Either Party may terminate this Agreement at any time upon thirty (30) days' prior written notice to the other Party. The obligations of confidentiality hereunder shall survive for three (3) years following the termination of this Agreement.
+
+IN WITNESS WHEREOF, the Parties have executed this Agreement as of the Effective Date.
+
+For FlowPilot Corp:
+Signature: ______________________
+Name: David Miller
+Title: VP of Engineering
+
+For NovaScale Technologies Inc:
+Signature: ______________________
+Name: Elena Rostova
+Title: Chief Operating Officer

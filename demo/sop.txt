@@ -1,0 +1,18 @@
+STANDARD OPERATING PROCEDURE: CUSTOMER DATA EXPORT REQUESTS
+Document ID: SOP-OPS-044
+Department: Customer Support & Operations
+Effective Date: August 1, 2026
+
+1. Purpose & Scope:
+This document outlines the step-by-step procedure for handling customer requests to export account data. This process must be followed strictly to comply with GDPR, CCPA, and enterprise privacy regulations.
+
+2. Scope:
+Applies to all Customer Support Representatives, Operations Leads, and Security Compliance Analysts.
+
+3. Procedure Steps:
+Step 1: Validate Customer Identity. Ensure the request is submitted from the registered account email. Do not export data for unverified requests.
+Step 2: File Ticket. Open a support ticket under the category "Compliance - Data Export Request" and attach the email verification log.
+Step 3: Trigger Data Compiling. Go to the Admin Panel, navigate to User Operations, click "Compile Backup Archive," and select the specific user ID.
+Step 4: Audit Output. Ensure that the backup folder contains only user-uploaded documents and does not contain raw database system logs.
+Step 5: Encryption & Transfer. Secure the compiled ZIP file with a password-protected link, email the link to the client, and send the password via an alternative messaging channel.
+Step 6: Close Ticket. Update the support ticket status to "Closed" once the user confirms receipt of the archive.

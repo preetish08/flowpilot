@@ -1,0 +1,27 @@
+INVOICE
+Invoice Number: INV-2026-9041
+Date: August 5, 2026
+Due Date: September 5, 2026
+
+Vendor Information:
+Apex Cloud Services LLC
+100 Innovation Way, Suite 400
+San Francisco, CA 94107
+billing@apexcloud.com
+
+Bill To:
+FlowPilot Corp
+500 Automation Blvd
+Austin, TX 78701
+
+Line Items:
+1. Enterprise Cloud Subscription (Aug 2026) ... Qty: 1 ... Unit Price: $1,200.00 ... Total: $1,200.00
+2. Database Backup Storage (2TB) .............. Qty: 1 ... Unit Price: $150.00 ..... Total: $150.00
+3. Professional Consulting (Hours: 5) ......... Qty: 5 ... Unit Price: $150.00 ..... Total: $750.00
+
+Subtotal: $2,100.00
+Tax (8.25%): $173.25
+Total Amount Due: $2,273.25
+Currency: USD
+
+Payment Terms: Net 30. Wire transfer to Account ending in 8831.
