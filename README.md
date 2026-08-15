@@ -1,6 +1,6 @@
 # FlowPilot - AI-Powered Document Automation & Security Sandbox
 
-FlowPilot is a full-stack, AI-powered document processing and workflow automation platform. Users can upload invoices, legal agreements, CVs, and standard operating procedures (SOPs). FlowPilot leverages the **Gemini 1.5 Flash API** to dynamically classify documents, extract structured JSON metadata, identify key timelines, suggest routing parameters, and generate actionable next steps.
+FlowPilot is a full-stack, AI-powered document processing and workflow automation platform. Users can upload invoices, legal agreements, CVs, and standard operating procedures (SOPs). FlowPilot leverages the **Gemini 3.6 Flash API** to dynamically classify documents, extract structured JSON metadata, identify key timelines, suggest routing parameters, and generate actionable next steps.
 
 Additionally, the project features a **Security Practice Sandbox** designed to train the system and demonstrate resilience against real-world threats—specifically **Indirect Prompt Injection** and noisy/smudged document extraction.
 
@@ -14,7 +14,7 @@ sequenceDiagram
     actor User as User / Sandbox client
     participant FE as React Frontend (Vite)
     participant BE as Express Backend
-    participant Gemini as Gemini 1.5 Flash API
+    participant Gemini as Gemini 3.6 Flash API
 
     User->>FE: Upload Document (PDF, Image, TXT)
     FE->>BE: POST /api/upload (FormData File)
@@ -35,7 +35,7 @@ sequenceDiagram
 
 ## ⚡ Core Features
 
-- **Multi-Modal Document Parsing**: Seamlessly processes text documents, PDFs, and scanner receipts/images using Gemini 1.5 Flash.
+- **Multi-Modal Document Parsing**: Seamlessly processes text documents, PDFs, and scanner receipts/images using Gemini 3.6 Flash.
 - **Dynamic Schema Extraction**: Automatically formats extracted details based on the detected document type:
   - **Invoices**: Tax calculations, total amounts, billing periods, and vendor credentials.
   - **Contracts**: Start/end dates, signing parties, and key compliance obligations.
