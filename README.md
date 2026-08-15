@@ -83,7 +83,7 @@ The **Practice Sandbox** workspace lets you test the system's defenses live usin
 
 #### 1. Clone the repository
 ```bash
-git clone https://github.com/your-username/flowpilot.git
+git clone https://github.com/preetish08/flowpilot.git
 cd flowpilot
 ```
 
