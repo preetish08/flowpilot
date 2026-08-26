@@ -1005,10 +1005,45 @@ function App() {
                   />
                 </div>
                 <button
-                  onClick={() => {
-                    setAuthSuccess("If this account exists, a reset link will be sent shortly.");
-                    setTimeout(() => { setAuthTab('login'); setAuthSuccess(null); }, 3000);
-                  }}
+               onClick={async () => {
+  if (!authForm.email) {
+    setAuthError("Please enter your email address.");
+    return;
+  }
+
+  setAuthError(null);
+  setAuthSuccess(null);
+
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/auth/forgot-password`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email: authForm.email
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to request password reset.");
+    }
+
+    setAuthSuccess(
+      "If this account exists, a password reset link has been sent to your email."
+    );
+
+    setTimeout(() => {
+      setAuthTab('login');
+      setAuthSuccess(null);
+    }, 5000);
+
+  } catch (err: any) {
+    setAuthError(err.message || "Unable to send reset link.");
+  }
+}}
                   className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs py-3.5 rounded-xl transition shadow-lg shadow-purple-600/10 cursor-pointer"
                 >
                   Send Reset Link
