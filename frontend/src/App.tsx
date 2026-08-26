@@ -153,7 +153,7 @@ interface EmailLog {
   sentAt: string;
 }
 
-const BACKEND_URL = "http://localhost:5000";
+const BACKEND_URL = "https://flowpilot-9nsr.onrender.com";
 
 function App() {
   // Navigation State
