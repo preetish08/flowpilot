@@ -8,6 +8,7 @@ const db = require("./db");
 require("dotenv").config();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const nodemailer = require("nodemailer");
 const JWT_SECRET = process.env.JWT_SECRET || "flowpilot_jwt_secret_token_key_2026";
 
 const authenticateToken = (req, res, next) => {
