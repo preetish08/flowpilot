@@ -369,7 +369,13 @@ class Database {
     user.id = result.lastID;
     return user;
   }
-
+  async updateUserPassword(userId, passwordHash) {
+    await dbRun(
+      "UPDATE Users SET passwordHash = ? WHERE id = ?",
+      [passwordHash, userId]
+    );
+    return true;
+  }
   async getUserByEmail(email) {
     return await dbGet("SELECT * FROM Users WHERE email = ?", [email]);
   }
