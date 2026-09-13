@@ -1,4 +1,11 @@
+
 import React, { useState, useEffect, useRef } from 'react'
+import {
+  supabase,
+  isPasswordRecoveryActive,
+  markRecoveryActive,
+  clearRecoveryState
+} from './supabase';
 import {
   FileText,
   FileSignature,
@@ -153,17 +160,35 @@ interface EmailLog {
   sentAt: string;
 }
 
+interface FlowPilotUser {
+  id: string;
+  email?: string;
+  fullName?: string;
+  companyName?: string;
+}
+
 const BACKEND_URL = "http://localhost:5000";
 
 function App() {
-  // Navigation State
-  const [viewMode, setViewMode] = useState<'landing' | 'dashboard'>('landing');
+  // Track password recovery state across sessions and mounts
+  const [isRecoveryMode, setIsRecoveryMode] = useState<boolean>(() => {
+    return isPasswordRecoveryActive();
+  });
+
+  // Navigation & User State
+  const [viewMode, setViewMode] = useState<'landing' | 'dashboard'>(isPasswordRecoveryActive() ? 'dashboard' : 'landing');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'sandbox' | 'emails' | 'settings' | 'upload'>('dashboard');
+  const [currentUser, setCurrentUser] = useState<FlowPilotUser | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+
+  // Form & Input References
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // History & Active Document state
   const [documentsHistory, setDocumentsHistory] = useState<DocumentAnalysis[]>([]);
   const [emailLogs, setEmailLogs] = useState<EmailLog[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<DocumentAnalysis | null>(null);
+  const [expandedEmailId, setExpandedEmailId] = useState<string | null>(null);
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -174,7 +199,17 @@ function App() {
   const [processingStage, setProcessingStage] = useState<number>(0);
   const [processingError, setProcessingError] = useState<string | null>(null);
 
-  // Settings & Due Date Filter state
+  // Search, Filter & Sorting state
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [filterType, setFilterType] = useState<string>("all");
+  const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [filterVendor, setFilterVendor] = useState<string>("all");
+  const [filterDueDate, setFilterDueDate] = useState<string>("all");
+  const [sortBy, setSortBy] = useState<string>("upload_desc");
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const itemsPerPage = 8;
+
+  // Settings state
   const [settings, setSettings] = useState<{ [key: string]: string }>({
     threshold_USD: "5000",
     threshold_EUR: "4500",
@@ -182,10 +217,9 @@ function App() {
   });
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [saveSettingsStatus, setSaveSettingsStatus] = useState<string | null>(null);
-  const [filterDueDate, setFilterDueDate] = useState<string>("all");
 
   // Auth Form State
-  const [authTab, setAuthTab] = useState<'login' | 'signup' | 'forgot'>('login');
+  const [authTab, setAuthTab] = useState<'login' | 'signup' | 'forgot' | 'reset'>(isPasswordRecoveryActive() ? 'reset' : 'login');
   const [authForm, setAuthForm] = useState({
     fullName: "",
     companyName: "",
@@ -196,127 +230,127 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSuccess, setAuthSuccess] = useState<string | null>(null);
 
+  // Helper to format Supabase user into FlowPilot currentUser
+  const formatUser = (user: any): FlowPilotUser | null => {
+    if (!user) return null;
+    const metadata = user.user_metadata || {};
+    const fullName = metadata.fullName || metadata.full_name || (user.email ? user.email.split('@')[0] : 'User');
+    const companyName = metadata.companyName || metadata.company_name || 'Enterprise';
+    return {
+      id: user.id,
+      email: user.email || '',
+      fullName,
+      companyName
+    };
+  };
+
+  // Helper to construct authorization headers for backend Express API calls
+  const getAuthHeaders = (): Record<string, string> => {
+    let token = authToken;
+    if (!token && typeof window !== 'undefined') {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('sb-') && key.endsWith('-auth-token')) {
+          try {
+            const item = JSON.parse(localStorage.getItem(key) || '{}');
+            if (item?.access_token) {
+              token = item.access_token;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+    }
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
     setAuthSuccess(null);
 
-    if (authTab === 'signup') {
-      if (!authForm.fullName || !authForm.companyName || !authForm.email || !authForm.password) {
-        setAuthError("All fields are required.");
-        return;
+    if (authTab === 'login') {
+      try {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: authForm.email.trim(),
+          password: authForm.password
+        });
+
+        if (error) {
+          setAuthError(error.message);
+          return;
+        }
+
+        if (data?.user) {
+          const formatted = formatUser(data.user);
+          setAuthToken(data.session?.access_token || null);
+          setCurrentUser(formatted);
+          setViewMode('dashboard');
+          setAuthError(null);
+          setAuthSuccess(null);
+          setAuthForm(prev => ({ ...prev, password: "", confirmPassword: "" }));
+        }
+      } catch (err: any) {
+        setAuthError(err.message || "Failed to sign in. Please try again.");
       }
+    } else if (authTab === 'signup') {
       if (authForm.password !== authForm.confirmPassword) {
         setAuthError("Passwords do not match.");
         return;
       }
 
       try {
-        const response = await fetch(`${BACKEND_URL}/api/auth/signup`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            fullName: authForm.fullName,
-            companyName: authForm.companyName,
-            email: authForm.email,
-            password: authForm.password
-          })
+        const { data, error } = await supabase.auth.signUp({
+          email: authForm.email.trim(),
+          password: authForm.password,
+          options: {
+            data: {
+              fullName: authForm.fullName.trim(),
+              companyName: authForm.companyName.trim()
+            }
+          }
         });
 
-        const data = await response.json();
-        if (!response.ok) {
-          const detailMsg = data.details ? `${data.error}: ${data.details}` : (data.error || "Registration failed");
-          throw new Error(detailMsg);
+        if (error) {
+          setAuthError(error.message);
+          return;
         }
 
-        localStorage.setItem("flowpilot_token", data.token);
-        setCurrentUser(data.user);
-        setAuthSuccess("Account created successfully!");
-      } catch (err: any) {
-        setAuthError(err.message || "Registration failed.");
-      }
-    } else if (authTab === 'login') {
-      if (!authForm.email || !authForm.password) {
-        setAuthError("Email and password are required.");
-        return;
-      }
-
-      try {
-        const response = await fetch(`${BACKEND_URL}/api/auth/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email: authForm.email,
-            password: authForm.password
-          })
-        });
-
-        const data = await response.json();
-        if (!response.ok) {
-          const detailMsg = data.details ? `${data.error}: ${data.details}` : (data.error || "Login failed");
-          throw new Error(detailMsg);
+        if (data?.session && data?.user) {
+          const formatted = formatUser(data.user);
+          setAuthToken(data.session.access_token);
+          setCurrentUser(formatted);
+          setViewMode('dashboard');
+          setAuthError(null);
+          setAuthSuccess(null);
+          setAuthForm(prev => ({ ...prev, password: "", confirmPassword: "" }));
+        } else if (data?.user) {
+          setAuthSuccess("Account created successfully! Please check your email to confirm your account before signing in.");
+          setAuthTab('login');
+          setAuthError(null);
+          setAuthForm(prev => ({ ...prev, password: "", confirmPassword: "" }));
         }
-
-        localStorage.setItem("flowpilot_token", data.token);
-        setCurrentUser(data.user);
-        setAuthSuccess("Signed in successfully!");
       } catch (err: any) {
-        setAuthError(err.message || "Invalid credentials.");
+        setAuthError(err.message || "Failed to create account. Please try again.");
       }
     }
   };
 
-  // Filter & Search state
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filterType, setFilterType] = useState<string>("all");
-  const [filterStatus, setFilterStatus] = useState<string>("all");
-  const [filterVendor, setFilterVendor] = useState<string>("all");
-  const [sortBy, setSortBy] = useState<string>("upload_desc");
-  const [currentPage, setCurrentPage] = useState<number>(1);
-  const itemsPerPage = 6;
-  const [expandedEmailId, setExpandedEmailId] = useState<string | null>(null);
-
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Check for stored token and authenticate
-  const [currentUser, setCurrentUser] = useState<any | null>(null);
-
-  const getAuthHeaders = (): Record<string, string> => {
-    const token = localStorage.getItem("flowpilot_token");
-    return token ? { "Authorization": `Bearer ${token}` } : {};
-  };
-
-  const checkAuth = async () => {
-    const token = localStorage.getItem("flowpilot_token");
-    if (!token) {
-      setCurrentUser(null);
-      return;
-    }
-
+  const logout = async () => {
+    clearRecoveryState();
+    setIsRecoveryMode(false);
     try {
-      const response = await fetch(`${BACKEND_URL}/api/auth/me`, {
-        headers: {
-          "Authorization": `Bearer ${token}`
-        }
-      });
-      if (response.ok) {
-        const user = await response.json();
-        setCurrentUser(user);
-      } else {
-        localStorage.removeItem("flowpilot_token");
-        setCurrentUser(null);
-      }
+      await supabase.auth.signOut();
     } catch (err) {
-      console.error("Auth check failed:", err);
+      console.error("Error during sign out:", err);
     }
-  };
-
-  const logout = () => {
-    localStorage.removeItem("flowpilot_token");
+    setAuthToken(null);
     setCurrentUser(null);
     setSelectedDocument(null);
     setPendingFile(null);
     setActiveTab("dashboard");
+    setViewMode("landing");
+    setAuthTab("login");
   };
 
   // Fetch documents history
@@ -406,7 +440,105 @@ function App() {
   };
 
   useEffect(() => {
-    checkAuth();
+    // 1. Check for error parameters in URL (e.g. if an expired/invalid reset link was clicked)
+    if (typeof window !== 'undefined') {
+      const hashStr = window.location.hash.replace(/^#/, '');
+      const hashParams = new URLSearchParams(hashStr);
+      const searchParams = new URLSearchParams(window.location.search);
+      const errorDesc = hashParams.get('error_description') || searchParams.get('error_description');
+      if (errorDesc) {
+        clearRecoveryState();
+        setIsRecoveryMode(false);
+        setViewMode('dashboard');
+        setAuthTab('forgot');
+        setAuthError(decodeURIComponent(errorDesc.replace(/\+/g, ' ')));
+        window.history.replaceState({}, document.title, window.location.pathname);
+        return;
+      }
+    }
+
+    // 2. If recovery was detected via URL or stored recovery flags, enter recovery mode
+    if (isPasswordRecoveryActive()) {
+      setIsRecoveryMode(true);
+      setAuthTab('reset');
+      setViewMode('dashboard');
+      setCurrentUser(null);
+    }
+
+    // 3. Check current session on initial page load using supabase.auth.getSession()
+    const restoreSession = async () => {
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) {
+          console.error("Error restoring session:", error);
+          return;
+        }
+
+        if (session?.user) {
+          setAuthToken(session.access_token);
+          // If in recovery flow, NEVER automatically redirect to normal dashboard
+          if (isPasswordRecoveryActive() || isRecoveryMode) {
+            setIsRecoveryMode(true);
+            setAuthTab('reset');
+            setViewMode('dashboard');
+            setCurrentUser(null);
+          } else {
+            setCurrentUser(formatUser(session.user));
+          }
+        }
+      } catch (err) {
+        console.error("Auth session initialization error:", err);
+      }
+    };
+
+    restoreSession();
+
+    // 4. Listen to auth state changes using supabase.auth.onAuthStateChange()
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log("[Supabase Auth Event in App]", event);
+
+      if (event === 'PASSWORD_RECOVERY') {
+        markRecoveryActive();
+        setIsRecoveryMode(true);
+        setViewMode('dashboard');
+        setAuthTab('reset');
+        setCurrentUser(null);
+        setAuthError(null);
+        setAuthSuccess(null);
+        if (session?.access_token) {
+          setAuthToken(session.access_token);
+        }
+      } else if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+        if (session?.user) {
+          setAuthToken(session.access_token);
+
+          // If recovery flow is active, do NOT redirect to normal dashboard
+          if (isPasswordRecoveryActive() || isRecoveryMode) {
+            setIsRecoveryMode(true);
+            setCurrentUser(null);
+            setAuthTab('reset');
+            setViewMode('dashboard');
+          } else {
+            setAuthTab(currentTab => {
+              if (currentTab !== 'reset') {
+                setCurrentUser(formatUser(session.user));
+              }
+              return currentTab;
+            });
+          }
+        }
+      } else if (event === 'SIGNED_OUT') {
+        clearRecoveryState();
+        setIsRecoveryMode(false);
+        setAuthToken(null);
+        setCurrentUser(null);
+        setAuthTab('login');
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -418,7 +550,9 @@ function App() {
       setDocumentsHistory([]);
       setEmailLogs([]);
     }
-  }, [currentUser, viewMode, activeTab]);  useEffect(() => {
+  }, [currentUser, viewMode, activeTab]);
+
+  useEffect(() => {
     setCurrentPage(1);
   }, [searchQuery, filterType, filterStatus, filterVendor, filterDueDate, sortBy]);
 
@@ -490,7 +624,7 @@ function App() {
       }
 
       const analyzedDoc: DocumentAnalysis = await response.json();
-      
+
       // Advance to validation stage
       setProcessingStage(4); // Validating Extracted Data
       await new Promise(resolve => setTimeout(resolve, 1200));
@@ -559,6 +693,11 @@ function App() {
   const [testEmailStatus, setTestEmailStatus] = useState<string | null>(null);
 
   const sendTestEmail = async () => {
+    if (!currentUser?.email) {
+      setTestEmailStatus("No logged-in user email found.");
+      setTimeout(() => setTestEmailStatus(null), 3000);
+      return;
+    }
     setTestEmailStatus("Sending...");
     try {
       const response = await fetch(`${BACKEND_URL}/api/jobs/send-test-email`, {
@@ -705,7 +844,7 @@ function App() {
 
   // Calculate statistics metrics
   const totalDocsCount = documentsHistory.length;
-  
+
   // Document type counts
   const invoicesCount = documentsHistory.filter(d => d.documentType === 'invoice').length;
   const contractsCount = documentsHistory.filter(d => d.documentType === 'contract').length;
@@ -747,7 +886,7 @@ function App() {
     const summaryMatch = doc.summary && doc.summary.toLowerCase().includes(q);
     const typeMatch = doc.documentType.toLowerCase().replace('_', ' ').includes(q);
     const statusMatch = doc.status.toLowerCase().includes(q);
-    
+
     // Extracted Fields matching
     let vendorMatch = false;
     let invoiceNumberMatch = false;
@@ -807,7 +946,7 @@ function App() {
   }).filter(doc => {
     const matchesType = filterType === 'all' || doc.documentType === filterType;
     const matchesStatus = filterStatus === 'all' || doc.status === filterStatus;
-    
+
     let matchesVendor = true;
     if (filterVendor !== 'all') {
       const invVendor = doc.invoiceData?.vendor?.value;
@@ -815,7 +954,7 @@ function App() {
       const bsBank = doc.bankStatementData?.bankName?.value;
       matchesVendor = invVendor === filterVendor || poVendor === filterVendor || bsBank === filterVendor;
     }
-    
+
     let matchesDueDate = true;
     if (filterDueDate !== 'all') {
       const dueDateStr = doc.invoiceData?.dueDate?.value;
@@ -838,7 +977,7 @@ function App() {
         }
       }
     }
-    
+
     return matchesType && matchesStatus && matchesVendor && matchesDueDate;
   });
 
@@ -849,7 +988,7 @@ function App() {
         return new Date(a.uploadedAt).getTime() - new Date(b.uploadedAt).getTime();
       case 'upload_desc':
         return new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime();
-      
+
       case 'amount_desc': {
         const getAmt = (d: DocumentAnalysis) => {
           if (d.documentType === 'invoice' || d.documentType === 'receipt') return d.invoiceData?.totalAmount?.value || 0;
@@ -866,13 +1005,13 @@ function App() {
         };
         return getAmt(a) - getAmt(b);
       }
-      
+
       case 'confidence_desc':
         return b.confidence - a.confidence;
-      
+
       case 'name_asc':
         return a.fileName.localeCompare(b.fileName);
-      
+
       default:
         return 0;
     }
@@ -888,7 +1027,7 @@ function App() {
   return (
     <div className="min-h-screen bg-black text-gray-100 flex flex-col font-sans">
       {/* LANDING PAGE */}
-      {viewMode === 'landing' && (
+      {viewMode === 'landing' && !isRecoveryMode && authTab !== 'reset' && (
         <div className="flex-1 flex flex-col">
           {/* Landing Navbar */}
           <nav className="flex items-center justify-between px-8 py-5 border-b border-gray-900 bg-black/60 backdrop-blur sticky top-0 z-50">
@@ -959,7 +1098,7 @@ function App() {
       )}
 
       {/* DASHBOARD WORKSPACE */}
-      {viewMode === 'dashboard' && !currentUser && (
+      {(isRecoveryMode || authTab === 'reset' || (viewMode === 'dashboard' && !currentUser)) && (
         <div className="flex-1 flex items-center justify-center p-6 bg-black min-h-screen">
           <div className="w-full max-w-md bg-gray-950 border border-gray-900 rounded-3xl p-8 shadow-2xl relative overflow-hidden">
             {/* Glowing orb accent */}
@@ -975,6 +1114,7 @@ function App() {
                 {authTab === 'login' && "Sign in to access your secure automation workspace"}
                 {authTab === 'signup' && "Create your workspace to automate document processing"}
                 {authTab === 'forgot' && "Enter your work email to request a reset link"}
+                {authTab === 'reset' && "Choose a new password for your account"}
               </p>
             </div>
 
@@ -992,7 +1132,145 @@ function App() {
               </div>
             )}
 
-            {authTab === 'forgot' ? (
+            {authTab === 'reset' ? (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!authForm.password || !authForm.confirmPassword) {
+                    setAuthError("Please fill in both password fields.");
+                    return;
+                  }
+
+                  if (authForm.password !== authForm.confirmPassword) {
+                    setAuthError("Passwords do not match.");
+                    return;
+                  }
+
+                  if (authForm.password.length < 6) {
+                    setAuthError("Password must be at least 6 characters.");
+                    return;
+                  }
+
+                  setAuthError(null);
+                  setAuthSuccess(null);
+
+                  try {
+                    const { error } = await supabase.auth.updateUser({
+                      password: authForm.password
+                    });
+
+                    if (error) {
+                      throw new Error(error.message);
+                    }
+
+                    clearRecoveryState();
+                    setIsRecoveryMode(false);
+                    setAuthSuccess("Password updated successfully! You can now sign in with your new password.");
+
+                    setAuthForm(prev => ({
+                      ...prev,
+                      password: "",
+                      confirmPassword: ""
+                    }));
+
+                    // Clean up URL hash / search params so tokens don't remain in browser history
+                    if (typeof window !== 'undefined' && (window.location.hash || window.location.search)) {
+                      window.history.replaceState({}, document.title, window.location.pathname);
+                    }
+
+                    // Return user to login screen after successful password update
+                    setTimeout(async () => {
+                      try {
+                        await supabase.auth.signOut();
+                      } catch (_) {}
+                      setAuthToken(null);
+                      setCurrentUser(null);
+                      setViewMode('dashboard');
+                      setAuthTab("login");
+                      setAuthSuccess("Password updated successfully! Please sign in with your new password.");
+                      setAuthError(null);
+                    }, 2500);
+
+                  } catch (err: any) {
+                    setAuthError(
+                      err.message || "Failed to update password."
+                    );
+                  }
+                }}
+                className="space-y-4 relative z-10"
+              >
+                <div className="text-center mb-2">
+                  <p className="text-gray-400 text-xs font-semibold">
+                    Choose a new password for your account
+                  </p>
+                </div>
+
+                <div>
+                  <label className="text-gray-400 text-[10px] uppercase font-bold block mb-1.5">
+                    New Password
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="••••••••"
+                    required
+                    className="w-full bg-black border border-gray-950 focus:border-purple-600 focus:ring-1 focus:ring-purple-600 rounded-xl px-4 py-3 text-xs text-white placeholder-gray-600 transition outline-none"
+                    value={authForm.password}
+                    onChange={e =>
+                      setAuthForm({ ...authForm, password: e.target.value })
+                    }
+                  />
+                </div>
+
+                <div>
+                  <label className="text-gray-400 text-[10px] uppercase font-bold block mb-1.5">
+                    Confirm Password
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="••••••••"
+                    required
+                    className="w-full bg-black border border-gray-950 focus:border-purple-600 focus:ring-1 focus:ring-purple-600 rounded-xl px-4 py-3 text-xs text-white placeholder-gray-600 transition outline-none"
+                    value={authForm.confirmPassword}
+                    onChange={e =>
+                      setAuthForm({ ...authForm, confirmPassword: e.target.value })
+                    }
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs py-3.5 rounded-xl transition shadow-lg shadow-purple-600/10 cursor-pointer"
+                >
+                  Update Password
+                </button>
+
+                <div className="text-center mt-6">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      clearRecoveryState();
+                      setIsRecoveryMode(false);
+                      try {
+                        await supabase.auth.signOut();
+                      } catch (_) {}
+                      setAuthToken(null);
+                      setCurrentUser(null);
+                      setViewMode('dashboard');
+                      setAuthTab("login");
+                      setAuthError(null);
+                      setAuthSuccess(null);
+                      if (typeof window !== 'undefined' && (window.location.hash || window.location.search)) {
+                        window.history.replaceState({}, document.title, window.location.pathname);
+                      }
+                    }}
+                    className="text-purple-400 hover:text-purple-300 text-xs font-semibold"
+                  >
+                    Back to Sign In
+                  </button>
+                </div>
+              </form>
+
+            ) : authTab === 'forgot' ? (
               <div className="space-y-4 relative z-10">
                 <div>
                   <label className="text-gray-400 text-[10px] uppercase font-bold block mb-1.5">Work Email</label>
@@ -1005,9 +1283,38 @@ function App() {
                   />
                 </div>
                 <button
-                  onClick={() => {
-                    setAuthSuccess("If this account exists, a reset link will be sent shortly.");
-                    setTimeout(() => { setAuthTab('login'); setAuthSuccess(null); }, 3000);
+                  type="button"
+                  onClick={async () => {
+                    const email = authForm.email.trim();
+                    if (!email) {
+                      setAuthError("Email is required.");
+                      return;
+                    }
+                    setAuthError(null);
+                    setAuthSuccess(null);
+
+                    try {
+                      const { error } = await supabase.auth.resetPasswordForEmail(
+                        email,
+                        {
+                          redirectTo: window.location.origin
+                        }
+                      );
+
+                      if (error) {
+                        throw new Error(error.message);
+                      }
+
+                      setAuthSuccess(
+                        "If this account exists, a password reset link has been sent to your email."
+                      );
+                      setTimeout(() => {
+                        setAuthTab('login');
+                        setAuthSuccess(null);
+                      }, 5000);
+                    } catch (err: any) {
+                      setAuthError(err.message || "Failed to process request.");
+                    }
                   }}
                   className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs py-3.5 rounded-xl transition shadow-lg shadow-purple-600/10 cursor-pointer"
                 >
@@ -1015,6 +1322,7 @@ function App() {
                 </button>
                 <div className="text-center mt-6">
                   <button
+                    type="button"
                     onClick={() => { setAuthTab('login'); setAuthError(null); setAuthSuccess(null); }}
                     className="text-purple-400 hover:text-purple-300 text-xs font-semibold"
                   >
@@ -1138,7 +1446,17 @@ function App() {
 
             <div className="text-center mt-8 pt-4 border-t border-gray-900/60">
               <button
-                onClick={() => setViewMode('landing')}
+                onClick={async () => {
+                  if (authTab === 'reset' || isRecoveryMode) {
+                    clearRecoveryState();
+                    setIsRecoveryMode(false);
+                    try { await supabase.auth.signOut(); } catch (_) {}
+                    setAuthToken(null);
+                    setCurrentUser(null);
+                    setAuthTab('login');
+                  }
+                  setViewMode('landing');
+                }}
                 className="text-gray-500 hover:text-gray-400 text-xs"
               >
                 Back to Public Landing
@@ -1149,7 +1467,7 @@ function App() {
       )}
 
       {/* DASHBOARD WORKSPACE */}
-      {viewMode === 'dashboard' && currentUser && (
+      {viewMode === 'dashboard' && currentUser && !isRecoveryMode && authTab !== 'reset' && (
         <div className="flex-1 flex h-screen overflow-hidden">
           {/* Sidebar */}
           <aside className="w-64 bg-gray-950 border-r border-gray-900 flex flex-col shrink-0">
@@ -1321,7 +1639,7 @@ function App() {
               {isUploading && (
                 <div className="max-w-xl mx-auto my-6 bg-gray-950 border border-gray-900 rounded-3xl p-8 flex flex-col shadow-2xl relative overflow-hidden">
                   <div className="absolute right-0 top-0 w-32 h-32 bg-purple-500/5 rounded-full blur-3xl"></div>
-                  
+
                   {/* Top Header */}
                   <div className="flex flex-col items-center text-center mb-8">
                     <div className="relative w-16 h-16 mb-4">
@@ -1358,9 +1676,9 @@ function App() {
                     <div className="space-y-6 relative pl-3">
                       {/* Vertical line indicator */}
                       <div className="absolute left-[21px] top-3 bottom-3 w-[2px] bg-gray-900">
-                        <div 
-                          className="w-full bg-gradient-to-b from-emerald-500 to-purple-500 transition-all duration-500" 
-                          style={{ 
+                        <div
+                          className="w-full bg-gradient-to-b from-emerald-500 to-purple-500 transition-all duration-500"
+                          style={{
                             height: `${(processingStage / 5) * 100}%`,
                             boxShadow: '0 0 8px rgba(168, 85, 247, 0.4)'
                           }}
@@ -1393,14 +1711,12 @@ function App() {
 
                             {/* Label & Description */}
                             <div className="space-y-0.5">
-                              <h4 className={`text-xs font-bold transition-colors ${
-                                isCompleted ? 'text-emerald-400/90' : isActive ? 'text-purple-300 animate-pulse' : 'text-gray-500'
-                              }`}>
+                              <h4 className={`text-xs font-bold transition-colors ${isCompleted ? 'text-emerald-400/90' : isActive ? 'text-purple-300 animate-pulse' : 'text-gray-500'
+                                }`}>
                                 {stage.title}
                               </h4>
-                              <p className={`text-[10px] transition-colors ${
-                                isCompleted ? 'text-gray-500' : isActive ? 'text-gray-300 font-medium' : 'text-gray-600'
-                              }`}>
+                              <p className={`text-[10px] transition-colors ${isCompleted ? 'text-gray-500' : isActive ? 'text-gray-300 font-medium' : 'text-gray-600'
+                                }`}>
                                 {stage.desc}
                               </p>
                             </div>
@@ -1458,11 +1774,10 @@ function App() {
                           }
                         }}
                         onClick={() => fileInputRef.current?.click()}
-                        className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center min-h-[280px] ${
-                          dragActive
-                            ? 'border-purple-500 bg-purple-500/5 scale-[0.99]'
-                            : 'border-gray-800 bg-black/40 hover:border-gray-700'
-                        }`}
+                        className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center min-h-[280px] ${dragActive
+                          ? 'border-purple-500 bg-purple-500/5 scale-[0.99]'
+                          : 'border-gray-800 bg-black/40 hover:border-gray-700'
+                          }`}
                       >
                         <input
                           type="file"
@@ -2263,10 +2578,10 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                               {scenario.badge}
                             </span>
                           </div>
-                          
+
                           <h4 className="text-white font-bold text-base">{scenario.title}</h4>
                           <p className="text-gray-400 text-xs leading-relaxed">{scenario.desc}</p>
-                          
+
                           <div className="bg-black/60 border border-gray-900 rounded-xl p-3.5 font-mono text-[10px] text-gray-500 overflow-x-auto whitespace-pre-wrap max-h-40">
                             {scenario.content}
                           </div>
@@ -2336,7 +2651,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                         <FileUp size={14} />
                         Process Another
                       </button>
-                      
+
                       <div className="h-6 w-[1px] bg-gray-800 mx-1 hidden sm:block"></div>
 
                       <span className={`text-[10px] font-bold border px-3 py-1 rounded-full uppercase tracking-wider ${getStatusColor(selectedDocument.status)}`}>
@@ -2359,7 +2674,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
 
                     {/* Columns 1 & 2: Summaries and fields */}
                     <div className="lg:col-span-2 space-y-6">
-                      
+
                       {/* Security Alerts and sandbox warning banners */}
                       {selectedDocument.fileName.includes("prompt_injection") && (
                         <div className="bg-emerald-500/5 border border-emerald-500/20 p-4 rounded-2xl flex items-start gap-3.5 shadow-md">
@@ -2844,7 +3159,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
 
                     {/* Column 3: Status Controls & AI insights */}
                     <div className="space-y-6">
-                      
+
                       {/* Action status control tools */}
                       {(selectedDocument.documentType === 'invoice' || selectedDocument.documentType === 'receipt') && (
                         <div className="bg-gray-950 border border-gray-900 rounded-3xl p-5 shadow-lg">
@@ -3013,18 +3328,18 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                           )}
 
                           {/* Safe check */}
-                          {!selectedDocument.isDuplicate && !selectedDocument.amountMismatch && !selectedDocument.missingGst && 
-                           (!selectedDocument.invoiceData || (selectedDocument.invoiceData.vendor?.value && selectedDocument.invoiceData.invoiceNumber?.value)) && (
-                            <div className="bg-emerald-500/5 border border-emerald-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
-                              <CheckCircle2 className="text-emerald-400 shrink-0 mt-0.5" size={16} />
-                              <div>
-                                <h5 className="text-emerald-400 text-[11px] font-bold">All Security Audits Passed</h5>
-                                <p className="text-gray-500 text-[10px] mt-0.5 leading-relaxed">
-                                  No calculations conflicts, duplicate invoices, or compliance loopholes detected.
-                                </p>
+                          {!selectedDocument.isDuplicate && !selectedDocument.amountMismatch && !selectedDocument.missingGst &&
+                            (!selectedDocument.invoiceData || (selectedDocument.invoiceData.vendor?.value && selectedDocument.invoiceData.invoiceNumber?.value)) && (
+                              <div className="bg-emerald-500/5 border border-emerald-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
+                                <CheckCircle2 className="text-emerald-400 shrink-0 mt-0.5" size={16} />
+                                <div>
+                                  <h5 className="text-emerald-400 text-[11px] font-bold">All Security Audits Passed</h5>
+                                  <p className="text-gray-500 text-[10px] mt-0.5 leading-relaxed">
+                                    No calculations conflicts, duplicate invoices, or compliance loopholes detected.
+                                  </p>
+                                </div>
                               </div>
-                            </div>
-                          )}
+                            )}
                         </div>
                       </div>
 
@@ -3138,7 +3453,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                   <div className="border-t border-gray-900 pt-6 space-y-4">
                     <h4 className="text-white text-sm font-bold">Compliance Thresholds</h4>
                     <p className="text-gray-500 text-xs mt-0.5">Configure high-value invoice approval thresholds for different currencies.</p>
-                    
+
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div className="flex flex-col gap-2">
                         <label className="text-xs font-bold text-gray-400">USD Threshold ($)</label>
@@ -3168,7 +3483,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                         />
                       </div>
                     </div>
-                    
+
                     <button
                       onClick={saveSettings}
                       disabled={isSavingSettings}

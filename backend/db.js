@@ -9,7 +9,7 @@ const db = new sqlite3.Database(DB_FILE);
 
 function dbRun(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.run(sql, params, function(err) {
+    db.run(sql, params, function (err) {
       if (err) reject(err);
       else resolve(this);
     });
@@ -42,16 +42,9 @@ class Database {
   init() {
     db.serialize(() => {
       // Create Users table
-      db.run(`CREATE TABLE IF NOT EXISTS Users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        email TEXT UNIQUE,
-        role TEXT,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP
-      )`);
 
-      // Prepopulate default user
-      db.run(`INSERT OR IGNORE INTO Users (id, name, email, role) VALUES (1, 'Admin User', 'admin@flowpilot.io', 'administrator')`);
+
+
 
       // Create Documents table
       db.run(`CREATE TABLE IF NOT EXISTS Documents (
@@ -111,10 +104,10 @@ class Database {
       )`);
 
       // Ensure new columns are present if the table was created under an older version
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN reminderType TEXT`, () => {});
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN scheduledDate TEXT`, () => {});
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN status TEXT`, () => {});
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN errorMessage TEXT`, () => {});
+      db.run(`ALTER TABLE EmailLogs ADD COLUMN reminderType TEXT`, () => { });
+      db.run(`ALTER TABLE EmailLogs ADD COLUMN scheduledDate TEXT`, () => { });
+      db.run(`ALTER TABLE EmailLogs ADD COLUMN status TEXT`, () => { });
+      db.run(`ALTER TABLE EmailLogs ADD COLUMN errorMessage TEXT`, () => { });
 
       // Create ReminderHistory table
       db.run(`CREATE TABLE IF NOT EXISTS ReminderHistory (
@@ -149,13 +142,15 @@ class Database {
       db.run(`INSERT OR IGNORE INTO Settings (key, value) VALUES ('threshold_INR', '100000')`);
 
       // Ensure columns exist in respective tables for data isolation and idempotency
-      db.run(`ALTER TABLE Documents ADD COLUMN userId TEXT`, () => {});
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN userId TEXT`, () => {});
-      db.run(`ALTER TABLE ReminderHistory ADD COLUMN userId TEXT`, () => {});
-      db.run(`ALTER TABLE ReminderHistory ADD COLUMN scheduledDate TEXT`, () => {});
-      db.run(`ALTER TABLE Users ADD COLUMN fullName TEXT`, () => {});
-      db.run(`ALTER TABLE Users ADD COLUMN companyName TEXT`, () => {});
-      db.run(`ALTER TABLE Users ADD COLUMN passwordHash TEXT`, () => {});
+      db.run(`ALTER TABLE Documents ADD COLUMN userId TEXT`, () => { });
+      db.run(`ALTER TABLE EmailLogs ADD COLUMN userId TEXT`, () => { });
+      db.run(`ALTER TABLE ReminderHistory ADD COLUMN userId TEXT`, () => { });
+      db.run(`ALTER TABLE ReminderHistory ADD COLUMN scheduledDate TEXT`, () => { });
+      db.run(`ALTER TABLE Users ADD COLUMN fullName TEXT`, () => { });
+      db.run(`ALTER TABLE Users ADD COLUMN companyName TEXT`, () => { });
+      db.run(`ALTER TABLE Users ADD COLUMN passwordHash TEXT`, () => { });
+      db.run(`ALTER TABLE Users ADD COLUMN resetTokenHash TEXT`, () => { });
+      db.run(`ALTER TABLE Users ADD COLUMN resetTokenExpiry INTEGER`, () => { });
     });
   }
 
@@ -274,14 +269,14 @@ class Database {
       suggestedActions = ?,
       keyDates = ?
       WHERE id = ?`, [
-        merged.status,
-        merged.isDuplicate ? 1 : 0,
-        merged.amountMismatch ? 1 : 0,
-        merged.missingGst ? 1 : 0,
-        JSON.stringify(merged.suggestedActions),
-        JSON.stringify(merged.keyDates),
-        id
-      ]);
+      merged.status,
+      merged.isDuplicate ? 1 : 0,
+      merged.amountMismatch ? 1 : 0,
+      merged.missingGst ? 1 : 0,
+      JSON.stringify(merged.suggestedActions),
+      JSON.stringify(merged.keyDates),
+      id
+    ]);
 
     return merged;
   }
@@ -380,6 +375,20 @@ class Database {
       return await dbGet("SELECT * FROM Users WHERE id = ?", [numericId]);
     }
     return await dbGet("SELECT * FROM Users WHERE id = ?", [id]);
+  }
+
+  async updateUserResetToken(email, hashedToken, expiryTime) {
+    await dbRun(
+      "UPDATE Users SET resetTokenHash = ?, resetTokenExpiry = ? WHERE email = ?",
+      [hashedToken, expiryTime, email]
+    );
+  }
+
+  async updateUserPasswordAndClearToken(email, newPasswordHash) {
+    await dbRun(
+      "UPDATE Users SET passwordHash = ?, resetTokenHash = NULL, resetTokenExpiry = NULL WHERE email = ?",
+      [newPasswordHash, email]
+    );
   }
 }
 

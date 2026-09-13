@@ -6,25 +6,55 @@ const rateLimit = require("express-rate-limit");
 const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai");
 const db = require("./db");
 require("dotenv").config();
+const { createClient } = require("@supabase/supabase-js");
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const nodemailer = require("nodemailer");
+const crypto = require("crypto");
 const JWT_SECRET = process.env.JWT_SECRET || "flowpilot_jwt_secret_token_key_2026";
 
-const authenticateToken = (req, res, next) => {
+
+
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
-  
+
   if (!token) {
-    return res.status(401).json({ error: "Access Denied: No Token Provided." });
+    return res.status(401).json({
+      error: "Access Denied: No Token Provided."
+    });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: "Access Denied: Invalid or Expired Token." });
+  try {
+    const {
+      data: { user },
+      error
+    } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      return res.status(403).json({
+        error: "Access Denied: Invalid or Expired Token."
+      });
     }
-    req.user = user;
+
+    req.user = {
+      id: user.id,
+      email: user.email
+    };
+
     next();
-  });
+  } catch (err) {
+    console.error("Supabase authentication failed:", err);
+
+    return res.status(403).json({
+      error: "Access Denied: Invalid or Expired Token."
+    });
+  }
 };
 
 const app = express();
@@ -425,14 +455,48 @@ function bufferToGenerativePart(buffer, mimeType) {
   };
 }
 
+const maskEmail = (email) => {
+  if (!email || typeof email !== "string" || !email.includes("@")) return email;
+  const [local, domain] = email.split("@");
+  if (local.length <= 2) return `${local[0]}***@${domain}`;
+  return `${local[0]}${"*".repeat(local.length - 2)}${local[local.length - 1]}@${domain}`;
+};
+
 // Scheduled Daily Check and Email Dispatch job logic
 // Email service abstraction
 class EmailService {
-  async sendEmail({ to, subject, body }) {
+  async sendEmail({ to, subject, body, html }) {
     const smtpConfigured = process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS;
     if (smtpConfigured) {
-      console.log(`[SMTP] Sending real email to ${to}...`);
-      return { success: true, method: "SMTP" };
+      console.log(`[SMTP] Attempting to send email via SMTP to ${maskEmail(to)}...`);
+      try {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST,
+          port: parseInt(process.env.SMTP_PORT || "587", 10),
+          secure: process.env.SMTP_SECURE === "true" || parseInt(process.env.SMTP_PORT, 10) === 465,
+          auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS,
+          },
+        });
+
+        const mailOptions = {
+          from: process.env.SMTP_FROM || `"FlowPilot Support" <noreply@flowpilot.io>`,
+          to,
+          subject,
+          text: body,
+        };
+        if (html) {
+          mailOptions.html = html;
+        }
+
+        const info = await transporter.sendMail(mailOptions);
+        console.log(`[SMTP] Email successfully sent to ${maskEmail(to)}. Message ID: ${info.messageId}`);
+        return { success: true, method: "SMTP", messageId: info.messageId };
+      } catch (error) {
+        console.error(`[SMTP] Error sending email to ${maskEmail(to)}:`, error);
+        throw error;
+      }
     } else {
       const simulatedText = `[SIMULATED EMAIL]\nTo: ${to}\nSubject: ${subject}\nBody:\n${body}`;
       console.log("-----------------------------------------");
@@ -470,7 +534,7 @@ async function runDailyChecks(userId = null) {
       logDecision(`Invoice ${doc.id} (${doc.fileName}): Ignored (Status is PAID)`);
       continue;
     }
-    
+
     if (doc.status === "Rejected") {
       logDecision(`Invoice ${doc.id} (${doc.fileName}): Ignored (Status is REJECTED)`);
       continue;
@@ -500,7 +564,7 @@ async function runDailyChecks(userId = null) {
       await db.updateDocument(doc.id, { status: "Overdue" });
       doc.status = "Overdue";
       logDecision(`Invoice ${doc.id} (${doc.fileName}): Marked as OVERDUE (Due date ${dueDateStr} is past)`);
-      
+
       // Log overdue state change event to EmailLogs for history UI
       await db.addEmailLog({
         id: Date.now().toString() + Math.random().toString(36).substring(2, 6),
@@ -569,13 +633,13 @@ async function runDailyChecks(userId = null) {
     const amount = doc.invoiceData?.totalAmount?.value || 0;
 
     const body = `Dear Partner,\n\nThis is an automated notification regarding a pending invoice in FlowPilot.\n\n` +
-                 `- Vendor: ${vendor}\n` +
-                 `- Invoice Number: ${invoiceNum}\n` +
-                 `- Total Amount: ${currency} ${amount.toLocaleString()}\n` +
-                 `- Due Date: ${dueDateStr}\n` +
-                 `- Status: ${doc.status}\n\n` +
-                 `Please review and process the payment as soon as possible.\n\n` +
-                 `Best regards,\nFlowPilot Accounts Automation`;
+      `- Vendor: ${vendor}\n` +
+      `- Invoice Number: ${invoiceNum}\n` +
+      `- Total Amount: ${currency} ${amount.toLocaleString()}\n` +
+      `- Due Date: ${dueDateStr}\n` +
+      `- Status: ${doc.status}\n\n` +
+      `Please review and process the payment as soon as possible.\n\n` +
+      `Best regards,\nFlowPilot Accounts Automation`;
 
     logDecision(`Invoice ${doc.id} (${doc.fileName}): Sending reminder "${reminderType}" to ${recipient}...`);
 
@@ -856,7 +920,7 @@ Extract these SOP fields:
       rawResult = await extractorModel.generateContent([extractionPrompt, filePart]);
       responseText = rawResult.response.text();
       console.log("Received response from Gemini API. Length:", responseText.length);
-      
+
       // Log raw response for debugging (Requirement 6)
       console.log("--- RAW GEMINI RESPONSE START ---");
       console.log(responseText);
@@ -895,7 +959,7 @@ Extract these SOP fields:
           console.error("Brace recovery failed:", retryError.message);
         }
       }
-      
+
       if (!analysisResult) {
         return res.status(422).json({
           error: "AI Response Parsing Failure",
@@ -1093,7 +1157,7 @@ Difference: ${(totalAmount - expected).toFixed(2)}`;
 
       // Adjust field confidence scores based on OCR readability & calculations consistency
       const readability = analysisResult.ocrVerification?.readabilityScore !== undefined ? analysisResult.ocrVerification.readabilityScore : 1.0;
-      
+
       const adjustConfidence = (fieldObj, factor = 1.0) => {
         if (fieldObj && typeof fieldObj === 'object' && 'confidence' in fieldObj) {
           let conf = fieldObj.confidence;
@@ -1136,17 +1200,17 @@ Difference: ${(totalAmount - expected).toFixed(2)}`;
       const duplicate = allDocs.find(doc => {
         if (doc.documentType !== "invoice" && doc.documentType !== "receipt") return false;
         const otherInv = doc.invoiceData || {};
-        
+
         // Match vendor and invoice number OR vendor, amount and date OR GST and invoice number
         const matchNumber = invoiceNumber && otherInv.invoiceNumber?.value?.toLowerCase() === invoiceNumber.toLowerCase();
         const matchAmountAndDate = otherInv.totalAmount?.value === totalAmount && otherInv.date?.value === date;
-        const matchGstAndNumber = invData.gstNumber?.value && otherInv.gstNumber?.value && 
-                                  invData.gstNumber.value.toLowerCase() === otherInv.gstNumber.value.toLowerCase() &&
-                                  invoiceNumber && otherInv.invoiceNumber?.value?.toLowerCase() === invoiceNumber.toLowerCase();
-        
-        return doc.id !== undefined && 
-               otherInv.vendor?.value?.toLowerCase() === vendor.toLowerCase() && 
-               (matchNumber || matchAmountAndDate || matchGstAndNumber);
+        const matchGstAndNumber = invData.gstNumber?.value && otherInv.gstNumber?.value &&
+          invData.gstNumber.value.toLowerCase() === otherInv.gstNumber.value.toLowerCase() &&
+          invoiceNumber && otherInv.invoiceNumber?.value?.toLowerCase() === invoiceNumber.toLowerCase();
+
+        return doc.id !== undefined &&
+          otherInv.vendor?.value?.toLowerCase() === vendor.toLowerCase() &&
+          (matchNumber || matchAmountAndDate || matchGstAndNumber);
       });
 
       if (duplicate) {
@@ -1347,6 +1411,139 @@ app.get("/api/auth/me", authenticateToken, async (req, res) => {
   }
 });
 
+// 4. Forgot Password Route
+app.post("/api/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "Email address is required." });
+    }
+
+    console.log(`[Forgot Password] Request received for email: ${maskEmail(email)}`);
+
+    const user = await db.getUserByEmail(email);
+    if (!user) {
+      console.log(`[Forgot Password] Email not found in database. Returning generic response.`);
+      return res.json({
+        message: "If this account exists, a password reset link has been sent to your email."
+      });
+    }
+
+    // Generate secure random token
+    const token = crypto.randomBytes(32).toString("hex");
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    // Expiry: 20 minutes from now
+    const expiryTime = Date.now() + 20 * 60 * 1000;
+
+    await db.updateUserResetToken(email, hashedToken, expiryTime);
+    console.log(`[Forgot Password] Secure reset token generated and saved. Expiry: ${new Date(expiryTime).toISOString()}`);
+
+    const frontendBase = req.headers.origin || process.env.FRONTEND_URL || "http://localhost:5173";
+    const resetUrl = `${frontendBase}/?token=${token}&email=${encodeURIComponent(email)}`;
+
+    const emailSubject = "FlowPilot Password Reset Request";
+    const emailBody = `Hello ${user.fullName || "User"},\n\n` +
+      `You are receiving this because you (or someone else) have requested the reset of the password for your account.\n\n` +
+      `Please click on the following link, or paste this into your browser to complete the process within 20 minutes:\n\n` +
+      `${resetUrl}\n\n` +
+      `If you did not request this, please ignore this email and your password will remain unchanged.\n\n` +
+      `Best regards,\nFlowPilot Accounts Automation`;
+
+    const htmlBody = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #f0f0f0; border-radius: 8px;">
+        <h2 style="color: #7c3aed; text-align: center;">FlowPilot Password Reset</h2>
+        <p>Hello ${user.fullName || "User"},</p>
+        <p>We received a request to reset your FlowPilot account password. Click the button below to set a new password:</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${resetUrl}" style="background-color: #7c3aed; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Reset Password</a>
+        </div>
+        <p>This link will expire in 20 minutes.</p>
+        <p style="color: #666; font-size: 12px; margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px;">
+          If you did not request a password reset, please ignore this email. Your password will remain secure.
+        </p>
+      </div>
+    `;
+
+    // Dispatch the email
+    try {
+      await emailService.sendEmail({
+        to: email,
+        subject: emailSubject,
+        body: emailBody,
+        html: htmlBody
+      });
+      console.log(`[Forgot Password] Successfully sent reset email`);
+    } catch (emailErr) {
+      console.error(`[Forgot Password] Error sending reset email:`, emailErr);
+    }
+
+    res.json({
+      message: "If this account exists, a password reset link has been sent to your email."
+    });
+  } catch (err) {
+    console.error("[Forgot Password] Critical failure:", err);
+    res.status(500).json({ error: "An error occurred while processing your request.", details: err.message });
+  }
+});
+
+// 5. Reset Password Route
+app.post("/api/auth/reset-password", async (req, res) => {
+  try {
+    const { email, token, newPassword } = req.body;
+
+    if (!email || !token || !newPassword) {
+      return res.status(400).json({ error: "Missing required parameters: email, token, and newPassword are all required." });
+    }
+
+    // Validate password strength: minimum 8 characters
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters long." });
+    }
+
+    console.log(`[Reset Password] Attempting password reset`);
+
+    const user = await db.getUserByEmail(email);
+    if (!user) {
+      console.log(`[Reset Password] User not found`);
+      return res.status(400).json({ error: "Invalid or expired password reset token." });
+    }
+
+    if (!user.resetTokenHash || !user.resetTokenExpiry) {
+      console.log(`[Reset Password] Reset token or expiry missing in DB`);
+      return res.status(400).json({ error: "Invalid or expired password reset token." });
+    }
+
+    // Check expiry
+    const now = Date.now();
+    const expiry = parseInt(user.resetTokenExpiry, 10);
+    if (now > expiry) {
+      console.log(`[Reset Password] Token expired. Expired at: ${new Date(expiry).toISOString()}, current time: ${new Date(now).toISOString()}`);
+      return res.status(400).json({ error: "Invalid or expired password reset token." });
+    }
+
+    // Verify token hash
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+    if (hashedToken !== user.resetTokenHash) {
+      console.log(`[Reset Password] Token hash mismatch`);
+      return res.status(400).json({ error: "Invalid or expired password reset token." });
+    }
+
+    // Hash the new password securely
+    const saltRounds = 10;
+    const newPasswordHash = await bcrypt.hash(newPassword, saltRounds);
+
+    // Save password and clear token
+    await db.updateUserPasswordAndClearToken(email, newPasswordHash);
+    console.log(`[Reset Password] Password successfully updated and token invalidated`);
+
+    res.json({ message: "Your password has been reset successfully." });
+  } catch (err) {
+    console.error("[Reset Password] Critical failure:", err);
+    res.status(500).json({ error: "An error occurred while resetting your password.", details: err.message });
+  }
+});
+
 // ==========================================
 // Protected Document Routes (Isolated per User)
 // ==========================================
@@ -1412,7 +1609,7 @@ app.post("/api/documents/:id/actions/:actionIndex", authenticateToken, async (re
 
     const currentStatus = doc.suggestedActions[actionIndex].status;
     doc.suggestedActions[actionIndex].status = currentStatus === "completed" ? "pending" : "completed";
-    
+
     await db.updateDocument(doc.id, { suggestedActions: doc.suggestedActions });
 
     res.json(doc);
@@ -1570,11 +1767,11 @@ app.post("/api/jobs/send-test-email", authenticateToken, async (req, res) => {
 
     const subject = "FlowPilot Automation Test Email";
     const body = `Hello ${req.user.fullName || "User"},\n\nThis is a real test email dispatched from your FlowPilot Enterprise Automation Engine to verify SMTP/Resend API settings.\n\n` +
-                 `Configuration Status:\n` +
-                 `- Recipient: ${recipient}\n` +
-                 `- Provider: ${process.env.RESEND_API_KEY ? "Resend API" : "Simulated/Dev Mode"}\n` +
-                 `- Dispatch Timestamp: ${new Date().toLocaleString()}\n\n` +
-                 `Regards,\nFlowPilot Accounts Automation`;
+      `Configuration Status:\n` +
+      `- Recipient: ${recipient}\n` +
+      `- Provider: ${process.env.RESEND_API_KEY ? "Resend API" : "Simulated/Dev Mode"}\n` +
+      `- Dispatch Timestamp: ${new Date().toLocaleString()}\n\n` +
+      `Regards,\nFlowPilot Accounts Automation`;
 
     const emailResult = await emailService.sendEmail({ to: recipient, subject, body });
 
@@ -1596,7 +1793,7 @@ app.post("/api/jobs/send-test-email", authenticateToken, async (req, res) => {
     res.json({ success: true, details: emailResult });
   } catch (err) {
     console.error("Test email dispatch failed:", err);
-    
+
     // Save failed log to database
     await db.addEmailLog({
       id: Date.now().toString() + Math.random().toString(36).substring(2, 6),
@@ -1621,7 +1818,7 @@ app.post("/api/jobs/send-test-email", authenticateToken, async (req, res) => {
 app.post("/api/jobs/run-test-scenario", authenticateToken, async (req, res) => {
   try {
     console.log("Setting up deterministic test scenario...");
-    
+
     // Clear out previous test scenario documents for this user
     const allDocs = await db.getDocuments(req.user.id);
     for (const doc of allDocs) {
@@ -1631,7 +1828,7 @@ app.post("/api/jobs/run-test-scenario", authenticateToken, async (req, res) => {
     }
 
     const today = new Date();
-    
+
     const addTestDoc = async (id, fileName, status, diffDays, email, isDuplicateScenario = false) => {
       const targetDate = new Date();
       targetDate.setDate(today.getDate() + diffDays);
@@ -1679,19 +1876,19 @@ app.post("/api/jobs/run-test-scenario", authenticateToken, async (req, res) => {
     // Inject test cases
     // 1. Reminder due (due in 3 days)
     await addTestDoc("test_due_3", "test_reminder_due_3_days.txt", "Pending", 3, "due-3@flowpilot.io");
-    
+
     // 2. Reminder not yet due (due in 10 days)
     await addTestDoc("test_due_10", "test_reminder_not_due_10_days.txt", "Pending", 10, "due-10@flowpilot.io");
-    
+
     // 3. Already paid (due in 3 days but Paid)
     await addTestDoc("test_paid_due_3", "test_reminder_already_paid.txt", "Paid", 3, "paid-3@flowpilot.io");
-    
+
     // 4. Duplicate reminder (due in 3 days, sent history exists)
     await addTestDoc("test_dup_due_3", "test_reminder_duplicate.txt", "Pending", 3, "dup-3@flowpilot.io", true);
-    
+
     // 5. Overdue invoice (due 14 days ago)
     await addTestDoc("test_overdue_14", "test_reminder_overdue_14_days.txt", "Pending", -14, "overdue-14@flowpilot.io");
-    
+
     // 6. Missing email (due in 1 day, email is null)
     await addTestDoc("test_missing_email", "test_reminder_missing_email.txt", "Pending", 1, null);
 
