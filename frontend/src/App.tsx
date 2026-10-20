@@ -167,7 +167,7 @@ interface FlowPilotUser {
   companyName?: string;
 }
 
-const BACKEND_URL = "http://localhost:5000";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://flowpilot-9nsr.onrender.com";
 
 function App() {
   // Track password recovery state across sessions and mounts
