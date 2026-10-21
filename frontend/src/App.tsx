@@ -259,7 +259,7 @@ function App() {
               token = item.access_token;
               break;
             }
-          } catch (_) {}
+          } catch (_) { }
         }
       }
     }
@@ -564,7 +564,7 @@ function App() {
             if (typeof window !== 'undefined' && window.location.hash) {
               try {
                 window.history.replaceState({}, document.title, window.location.pathname);
-              } catch (_) {}
+              } catch (_) { }
             }
           }
         }
@@ -1223,7 +1223,7 @@ function App() {
                     setTimeout(async () => {
                       try {
                         await supabase.auth.signOut();
-                      } catch (_) {}
+                      } catch (_) { }
                       setAuthToken(null);
                       setCurrentUser(null);
                       setViewMode('dashboard');
@@ -1293,7 +1293,7 @@ function App() {
                       setIsRecoveryMode(false);
                       try {
                         await supabase.auth.signOut();
-                      } catch (_) {}
+                      } catch (_) { }
                       setAuthToken(null);
                       setCurrentUser(null);
                       setViewMode('dashboard');
@@ -1527,7 +1527,7 @@ function App() {
                   if (authTab === 'reset' || isRecoveryMode) {
                     clearRecoveryState();
                     setIsRecoveryMode(false);
-                    try { await supabase.auth.signOut(); } catch (_) {}
+                    try { await supabase.auth.signOut(); } catch (_) { }
                     setAuthToken(null);
                     setCurrentUser(null);
                     setAuthTab('login');
@@ -1804,7 +1804,7 @@ function App() {
                   )}
 
                   <div className="mt-8 text-center text-[10px] text-gray-600 font-mono">
-                    Model: Gemini 3.5 Flash Ingest Pipeline v1.2
+                    Gemini 3.8 Flash Ingest Pipeline v1.3
                   </div>
                 </div>
               )}

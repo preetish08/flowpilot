@@ -758,7 +758,7 @@ app.post("/api/upload", authenticateToken, uploadLimiter, (req, res, next) => {
     // Stage 1: Document Classification
     console.log("Stage 1: Classifying document type...");
     const classifierModel = genAI.getGenerativeModel({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.8-flash",
       generationConfig: {
         responseMimeType: "application/json",
         responseSchema: classificationSchema
@@ -907,7 +907,7 @@ Extract these SOP fields:
 
     console.log(`Stage 2: Extracting specific details using schema for "${detectedType}"...`);
     const extractorModel = genAI.getGenerativeModel({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.8-flash",
       generationConfig: {
         responseMimeType: "application/json",
         responseSchema: selectedSchema
