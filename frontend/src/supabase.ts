@@ -1,10 +1,16 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabasePublishableKey =
+const projectDefaultUrl = 'https://baihkbkmiovevwimnjon.supabase.co';
+const projectDefaultKey = 'sb_publishable_U3ObGqIkKc83qtPzDrh9Dw_B2n9qLpf';
+
+export const supabaseUrl =
+  import.meta.env.VITE_SUPABASE_URL ||
+  projectDefaultUrl;
+
+export const supabasePublishableKey =
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
   import.meta.env.VITE_SUPABASE_ANON_KEY ||
-  '';
+  projectDefaultKey;
 
 export const isRecoveryUrl = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -90,7 +96,15 @@ export const clearRecoveryState = (): void => {
 
 export const supabase = createClient(
   supabaseUrl,
-  supabasePublishableKey
+  supabasePublishableKey,
+  {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+      storage: typeof window !== 'undefined' ? window.localStorage : undefined
+    }
+  }
 );
 
 // Register early auth listener immediately upon client creation so early PASSWORD_RECOVERY events are never missed
