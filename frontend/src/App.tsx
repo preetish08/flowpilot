@@ -33,6 +33,10 @@ import {
   LayoutDashboard,
   ShieldAlert,
   DollarSign,
+  IndianRupee,
+  Euro,
+  PoundSterling,
+  Banknote,
   Clock,
   Filter,
   FileCheck,
@@ -44,13 +48,199 @@ import {
   ChevronUp,
   FolderSync,
   PieChart,
-  BarChart2
+  BarChart2,
+  RefreshCw
 } from 'lucide-react'
 
 // Document Analysis Types
 interface ExtractedField<T> {
   value: T;
   confidence: number;
+}
+
+type MaybeExtracted<T> = ExtractedField<T> | T | null | undefined;
+
+function getFieldValue<T>(field: MaybeExtracted<T>, defaultVal: T | null = null): T | null {
+  if (field === null || field === undefined) return defaultVal;
+  if (typeof field === 'object' && !Array.isArray(field) && 'value' in (field as object)) {
+    const val = (field as ExtractedField<T>).value;
+    return val !== null && val !== undefined ? val : defaultVal;
+  }
+  return field as T;
+}
+
+function getFieldConfidence(field: any, defaultConf: number | null = null): number | null {
+  if (field && typeof field === 'object' && typeof field.confidence === 'number') {
+    return field.confidence;
+  }
+  return defaultConf;
+}
+
+// Currency Normalization and Formatting Utilities
+export function normalizeCurrencyCode(val: any): string {
+  if (!val) return 'UNKNOWN';
+  if (typeof val === 'object' && val !== null) {
+    val = val.value || val.code || val.currency || '';
+  }
+  const str = String(val).trim();
+  if (!str) return 'UNKNOWN';
+
+  const upper = str.toUpperCase();
+  if (upper === 'UNKNOWN' || upper === 'NONE' || upper === 'N/A' || upper === 'NULL' || upper === 'UNDEFINED') {
+    return 'UNKNOWN';
+  }
+
+  // Symbol or code mapping
+  if (upper === 'INR' || str === '₹' || upper === 'RS' || upper === 'RS.' || upper === 'RUPEE' || upper === 'RUPEES' || upper.startsWith('INR')) {
+    return 'INR';
+  }
+  if (upper === 'USD' || str === '$' || upper === 'US$' || upper === 'DOLLAR' || upper === 'DOLLARS' || upper.startsWith('USD')) {
+    return 'USD';
+  }
+  if (upper === 'EUR' || str === '€' || upper === 'EURO' || upper === 'EUROS' || upper.startsWith('EUR')) {
+    return 'EUR';
+  }
+  if (upper === 'GBP' || str === '£' || upper === 'POUND' || upper === 'POUNDS' || upper === 'STERLING' || upper.startsWith('GBP')) {
+    return 'GBP';
+  }
+  if (upper === 'CAD' || str === 'CA$' || str === 'C$' || upper.startsWith('CAD')) {
+    return 'CAD';
+  }
+  if (upper === 'AUD' || str === 'AU$' || str === 'A$' || upper.startsWith('AUD')) {
+    return 'AUD';
+  }
+  if (upper === 'JPY' || str === '¥' || upper === 'YEN' || upper.startsWith('JPY')) {
+    return 'JPY';
+  }
+  if (upper === 'CHF' || upper.startsWith('CHF')) {
+    return 'CHF';
+  }
+  if (upper === 'CNY' || upper.startsWith('CNY')) {
+    return 'CNY';
+  }
+  if (upper === 'SGD' || str === 'S$' || upper.startsWith('SGD')) {
+    return 'SGD';
+  }
+  if (upper === 'AED' || upper.startsWith('AED')) {
+    return 'AED';
+  }
+  if (upper === 'NZD' || upper.startsWith('NZD')) {
+    return 'NZD';
+  }
+
+  if (/^[A-Z]{3}$/.test(upper)) {
+    return upper;
+  }
+
+  return 'UNKNOWN';
+}
+
+export function getDocumentCurrency(doc?: DocumentAnalysis | null): string {
+  if (!doc) return 'UNKNOWN';
+  if (doc.currency) {
+    const norm = normalizeCurrencyCode(doc.currency);
+    if (norm !== 'UNKNOWN') return norm;
+  }
+  if (doc.invoiceData?.currency) {
+    const val = getFieldValue<string>(doc.invoiceData.currency);
+    const norm = normalizeCurrencyCode(val);
+    if (norm !== 'UNKNOWN') return norm;
+  }
+  if ((doc as any).extractedJson) {
+    const ej = (doc as any).extractedJson;
+    const jsonCurr = ej.currency || ej.invoiceData?.currency?.value || ej.invoiceData?.currency;
+    const norm = normalizeCurrencyCode(jsonCurr);
+    if (norm !== 'UNKNOWN') return norm;
+  }
+  return 'UNKNOWN';
+}
+
+const CURRENCY_LOCALES: Record<string, string> = {
+  INR: 'en-IN',
+  USD: 'en-US',
+  EUR: 'en-IE',
+  GBP: 'en-GB',
+  CAD: 'en-CA',
+  AUD: 'en-AU',
+  JPY: 'ja-JP',
+  SGD: 'en-SG',
+  AED: 'en-AE',
+  CHF: 'de-CH',
+  CNY: 'zh-CN',
+  NZD: 'en-NZ'
+};
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  INR: '₹',
+  USD: '$',
+  EUR: '€',
+  GBP: '£',
+  JPY: '¥',
+  CAD: 'CA$',
+  AUD: 'A$',
+  CHF: 'CHF',
+  CNY: '¥',
+  SGD: 'S$',
+  AED: 'AED'
+};
+
+export function formatCurrency(
+  val: number | null | undefined,
+  currency?: string | null,
+  options?: { minimumFractionDigits?: number; maximumFractionDigits?: number }
+): string {
+  if (val === null || val === undefined || isNaN(Number(val))) {
+    return '0.00';
+  }
+
+  const num = Number(val);
+  const minDigits = options?.minimumFractionDigits !== undefined ? options.minimumFractionDigits : 2;
+  const maxDigits = options?.maximumFractionDigits !== undefined ? options.maximumFractionDigits : 2;
+
+  const code = normalizeCurrencyCode(currency);
+
+  if (code === 'UNKNOWN') {
+    const formattedNum = num.toLocaleString('en-US', {
+      minimumFractionDigits: minDigits,
+      maximumFractionDigits: maxDigits
+    });
+    return `${formattedNum} (Unknown Currency)`;
+  }
+
+  const locale = CURRENCY_LOCALES[code] || 'en-US';
+
+  try {
+    return new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency: code,
+      minimumFractionDigits: minDigits,
+      maximumFractionDigits: maxDigits
+    }).format(num);
+  } catch (_) {
+    const symbol = CURRENCY_SYMBOLS[code] || code;
+    const formattedNum = num.toLocaleString(code === 'INR' ? 'en-IN' : 'en-US', {
+      minimumFractionDigits: minDigits,
+      maximumFractionDigits: maxDigits
+    });
+    return `${symbol}${formattedNum}`;
+  }
+}
+
+export function getCurrencyIcon(currencyCode: string, size = 18, className = "text-emerald-400") {
+  switch (currencyCode) {
+    case 'INR':
+      return <IndianRupee size={size} className={className} />;
+    case 'USD':
+      return <DollarSign size={size} className={className} />;
+    case 'EUR':
+      return <Euro size={size} className={className} />;
+    case 'GBP':
+      return <PoundSterling size={size} className={className} />;
+    case 'UNKNOWN':
+      return <AlertCircle size={size} className="text-amber-400" />;
+    default:
+      return <Banknote size={size} className={className} />;
+  }
 }
 
 interface DocumentAnalysis {
@@ -63,9 +253,11 @@ interface DocumentAnalysis {
   isDuplicate?: boolean;
   amountMismatch?: boolean;
   missingGst?: boolean;
+  currency?: string | null;
   documentType: 'invoice' | 'receipt' | 'resume' | 'contract' | 'sop' | 'policy' | 'purchase_order' | 'bank_statement' | 'other';
   confidence: number;
   summary: string;
+  modelUsed?: string;
   ocrVerification?: {
     readabilityScore: number;
     notes: string;
@@ -75,25 +267,47 @@ interface DocumentAnalysis {
     reason: string;
   };
   invoiceData?: {
-    vendor?: ExtractedField<string>;
-    customerName?: ExtractedField<string>;
-    invoiceNumber?: ExtractedField<string>;
-    date?: ExtractedField<string>;
-    dueDate?: ExtractedField<string>;
-    subtotal?: ExtractedField<number>;
-    tax?: ExtractedField<number>;
-    shipping?: ExtractedField<number>;
-    discount?: ExtractedField<number>;
-    totalAmount?: ExtractedField<number>;
-    currency?: ExtractedField<string>;
-    gstNumber?: ExtractedField<string>;
-    paymentTerms?: ExtractedField<string>;
-    email?: ExtractedField<string>;
-    phone?: ExtractedField<string>;
-    lineItems?: ExtractedField<{
+    vendor?: MaybeExtracted<string>;
+    vendorAddress?: MaybeExtracted<string>;
+    customerName?: MaybeExtracted<string>;
+    customerAddress?: MaybeExtracted<string>;
+    customerGstin?: MaybeExtracted<string>;
+    invoiceNumber?: MaybeExtracted<string>;
+    date?: MaybeExtracted<string>;
+    dueDate?: MaybeExtracted<string>;
+    subtotal?: MaybeExtracted<number>;
+    grossSubtotal?: MaybeExtracted<number>;
+    netTaxableSubtotal?: MaybeExtracted<number>;
+    tax?: MaybeExtracted<number>;
+    totalGst?: MaybeExtracted<number>;
+    cgst?: MaybeExtracted<number>;
+    sgst?: MaybeExtracted<number>;
+    igst?: MaybeExtracted<number>;
+    vat?: MaybeExtracted<number>;
+    salesTax?: MaybeExtracted<number>;
+    otherTaxes?: MaybeExtracted<number>;
+    taxRates?: MaybeExtracted<string>;
+    shipping?: MaybeExtracted<number>;
+    freight?: MaybeExtracted<number>;
+    otherCharges?: MaybeExtracted<number>;
+    roundOff?: MaybeExtracted<number>;
+    discount?: MaybeExtracted<number>;
+    totalAmount?: MaybeExtracted<number>;
+    amountPaid?: MaybeExtracted<number>;
+    balanceDue?: MaybeExtracted<number>;
+    paymentStatus?: MaybeExtracted<string>;
+    currency?: MaybeExtracted<string>;
+    gstNumber?: MaybeExtracted<string>;
+    paymentTerms?: MaybeExtracted<string>;
+    email?: MaybeExtracted<string>;
+    phone?: MaybeExtracted<string>;
+    poNumber?: MaybeExtracted<string>;
+    hsnSac?: MaybeExtracted<string>;
+    lineItems?: MaybeExtracted<{
       description: string;
       quantity?: number | null;
       unitPrice?: number | null;
+      taxableAmount?: number | null;
       amount?: number | null;
     }[]>;
   };
@@ -168,7 +382,7 @@ interface FlowPilotUser {
   companyName?: string;
 }
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://flowpilot-9nsr.onrender.com";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? "http://localhost:5000" : "https://flowpilot-9nsr.onrender.com");
 
 function App() {
   // Track password recovery state across sessions and mounts
@@ -197,8 +411,15 @@ function App() {
   const [backendError, setBackendError] = useState<string | null>(null);
   const [cronJobStatus, setCronJobStatus] = useState<string | null>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [uploadingFileName, setUploadingFileName] = useState<string>("");
   const [processingStage, setProcessingStage] = useState<number>(0);
+  const [uploadStatusText, setUploadStatusText] = useState<string>("Uploading invoice...");
+  const [isSlowProcessing, setIsSlowProcessing] = useState<boolean>(false);
+  const [lastFailedFile, setLastFailedFile] = useState<File | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
+  const [isReprocessing, setIsReprocessing] = useState<boolean>(false);
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Search, Filter & Sorting state
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -613,12 +834,16 @@ function App() {
     e.stopPropagation();
     setDragActive(false);
 
+    if (isUploading) return; // Prevent duplicate concurrent submissions
+
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       await processUploadedFile(e.dataTransfer.files[0]);
     }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isUploading) return; // Prevent duplicate concurrent submissions
+
     if (e.target.files && e.target.files[0]) {
       await processUploadedFile(e.target.files[0]);
     }
@@ -626,18 +851,30 @@ function App() {
 
   // Perform upload to Express Backend
   const processUploadedFile = async (file: File) => {
+    if (isUploading) return; // Prevent duplicate concurrent submissions
+
     setIsUploading(true);
     setProcessingError(null);
-    setProcessingStage(0); // 0 = Uploading
+    setLastFailedFile(null);
+    setUploadingFileName(file.name);
+    setProcessingStage(0); // 0 = Uploading invoice
+    setUploadStatusText("Uploading invoice to server...");
+    setIsSlowProcessing(false);
 
-    // Start advancing stages periodically as simulation
-    let currentStage = 0;
-    const stageInterval = setInterval(() => {
-      if (currentStage < 3) {
-        currentStage++;
-        setProcessingStage(currentStage);
-      }
-    }, 1500);
+    // Create AbortController for user cancellation and request cleanup
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    // Track stages accurately based on elapsed processing time
+    const timerExtracting = setTimeout(() => {
+      setProcessingStage(1); // 1 = Extracting invoice details with Gemini
+      setUploadStatusText("Extracting invoice details & currency with Gemini...");
+    }, 1200);
+
+    const timerSlowNotice = setTimeout(() => {
+      setIsSlowProcessing(true);
+      setUploadStatusText("Analyzing line items and tax schedule with Gemini... (taking a moment for complex layout)");
+    }, 9000);
 
     try {
       const formData = new FormData();
@@ -649,9 +886,11 @@ function App() {
           ...getAuthHeaders()
         },
         body: formData,
+        signal: controller.signal
       });
 
-      clearInterval(stageInterval);
+      clearTimeout(timerExtracting);
+      clearTimeout(timerSlowNotice);
 
       if (!response.ok) {
         let errorMsg = "Upload failed";
@@ -666,21 +905,27 @@ function App() {
 
       const analyzedDoc: DocumentAnalysis = await response.json();
 
-      // Advance to validation stage
-      setProcessingStage(4); // Validating Extracted Data
-      await new Promise(resolve => setTimeout(resolve, 1200));
-
-      // Advance to complete stage
-      setProcessingStage(5); // Analysis Complete
-      await new Promise(resolve => setTimeout(resolve, 800));
-
-      setPendingFile(null); // Clear selected file
+      // Display the extracted invoice details immediately without artificial delays
+      setPendingFile(null);
+      setLastFailedFile(null);
       setSelectedDocument(analyzedDoc);
       fetchHistory();
       setIsUploading(false);
+      setIsSlowProcessing(false);
     } catch (err: any) {
-      clearInterval(stageInterval);
-      setProcessingError(err.message || "Failed to connect to backend server. Please verify the backend is running.");
+      clearTimeout(timerExtracting);
+      clearTimeout(timerSlowNotice);
+      setIsUploading(false);
+      setIsSlowProcessing(false);
+
+      if (err.name === 'AbortError') {
+        setProcessingError("Upload was cancelled.");
+      } else {
+        setLastFailedFile(file); // Preserve file for one-click retry
+        setProcessingError(err.message || "Failed to connect to backend server. Please verify the backend is running.");
+      }
+    } finally {
+      abortControllerRef.current = null;
     }
   };
 
@@ -873,7 +1118,9 @@ function App() {
   };
 
   // Confidence Rating Element
-  const renderConfidenceBadge = (score: number) => {
+  // Confidence Rating Element
+  const renderConfidenceBadge = (score?: number | null) => {
+    if (score === undefined || score === null || isNaN(score) || score <= 0) return null;
     const pct = Math.round(score * 100);
     const color = pct >= 90 ? 'text-emerald-400' : pct >= 70 ? 'text-amber-400' : 'text-rose-400';
     return (
@@ -881,6 +1128,31 @@ function App() {
         ({pct}% AI)
       </span>
     );
+  };
+
+  // Reprocess existing document handler
+  const handleReprocessDocument = async (docId: string) => {
+    setIsReprocessing(true);
+    setReprocessError(null);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/documents/${docId}/reprocess`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${authToken}`
+        }
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to reprocess document.");
+      }
+      setSelectedDocument(data);
+      setDocumentsHistory(prev => prev.map(d => d.id === data.id ? data : d));
+    } catch (err: any) {
+      setReprocessError(err.message || "Failed to reprocess document.");
+    } finally {
+      setIsReprocessing(false);
+    }
   };
 
   // Calculate statistics metrics
@@ -902,20 +1174,65 @@ function App() {
   const paidCount = documentsHistory.filter(d => d.status === 'Paid').length;
   const overdueCount = documentsHistory.filter(d => d.status === 'Overdue').length;
 
-  const outstandingAmount = documentsHistory
-    .filter(d => (d.documentType === 'invoice' || d.documentType === 'receipt' || d.documentType === 'purchase_order') && (d.status === 'Pending' || d.status === 'Overdue'))
-    .reduce((sum, doc) => {
-      let val = 0;
-      if (doc.documentType === 'invoice' || doc.documentType === 'receipt') {
-        val = doc.invoiceData?.totalAmount?.value || 0;
-      } else if (doc.documentType === 'purchase_order') {
-        val = doc.purchaseOrderData?.totalAmount?.value || 0;
+  // Multi-currency outstanding totals:
+  // - Grouped independently by currency (never add amounts from different currencies together)
+  // - Payable invoices/receipts only; excludes Paid, Rejected, etc.
+  // - Uses balanceDue if available (> 0), otherwise totalAmount - amountPaid
+  // - Deduplicates documents by ID to prevent double counting
+  const outstandingByCurrency = React.useMemo(() => {
+    const map: Record<string, { total: number; count: number }> = {};
+    const seenIds = new Set<string>();
+
+    for (const doc of documentsHistory) {
+      if (!doc || !doc.id || seenIds.has(doc.id)) continue;
+      seenIds.add(doc.id);
+
+      const isPayable = doc.documentType === 'invoice' || doc.documentType === 'receipt';
+      const isOutstanding = doc.status === 'Pending' || doc.status === 'Overdue';
+      if (!isPayable || !isOutstanding) continue;
+
+      let docAmt = 0;
+      const balanceDue = getFieldValue<number>(doc.invoiceData?.balanceDue);
+      if (balanceDue !== null && balanceDue !== undefined && !isNaN(Number(balanceDue))) {
+        docAmt = Number(balanceDue);
+      } else {
+        const total = getFieldValue<number>(doc.invoiceData?.totalAmount, 0) || 0;
+        const paid = getFieldValue<number>(doc.invoiceData?.amountPaid, 0) || 0;
+        docAmt = Math.max(0, total - paid);
       }
-      return sum + val;
-    }, 0);
+
+      if (isNaN(docAmt) || docAmt <= 0) continue;
+
+      const curr = getDocumentCurrency(doc);
+      if (!map[curr]) {
+        map[curr] = { total: 0, count: 0 };
+      }
+      map[curr].total += docAmt;
+      map[curr].count += 1;
+    }
+
+    const items = Object.entries(map).map(([curr, data]) => ({
+      currency: curr,
+      total: Math.round(data.total * 100) / 100,
+      count: data.count
+    }));
+
+    // Prioritize INR, then USD, EUR, GBP, other ISO codes, UNKNOWN last
+    items.sort((a, b) => {
+      if (a.currency === 'UNKNOWN') return 1;
+      if (b.currency === 'UNKNOWN') return -1;
+      if (a.currency === 'INR') return -1;
+      if (b.currency === 'INR') return 1;
+      if (a.currency === 'USD') return -1;
+      if (b.currency === 'USD') return 1;
+      return a.currency.localeCompare(b.currency);
+    });
+
+    return items;
+  }, [documentsHistory]);
 
   // List unique vendors for filtering
-  const uniqueVendors = Array.from(new Set(documentsHistory.filter(d => d.documentType === 'invoice' || d.documentType === 'receipt').map(d => d.invoiceData?.vendor?.value).filter(Boolean))) as string[];
+  const uniqueVendors = Array.from(new Set(documentsHistory.filter(d => d.documentType === 'invoice' || d.documentType === 'receipt').map(d => getFieldValue<string>(d.invoiceData?.vendor)).filter(Boolean))) as string[];
 
   // Filter history logic
   const filteredDocuments = documentsHistory.filter(doc => {
@@ -937,10 +1254,18 @@ function App() {
     if (doc.documentType === 'invoice' || doc.documentType === 'receipt') {
       const inv = doc.invoiceData;
       if (inv) {
-        vendorMatch = !!inv.vendor?.value?.toLowerCase().includes(q) || !!inv.customerName?.value?.toLowerCase().includes(q);
-        invoiceNumberMatch = !!inv.invoiceNumber?.value?.toLowerCase().includes(q) || !!inv.gstNumber?.value?.toLowerCase().includes(q);
-        amountMatch = !!inv.totalAmount?.value?.toString().includes(q) || !!inv.subtotal?.value?.toString().includes(q);
-        dateMatch = !!inv.date?.value?.includes(q) || !!inv.dueDate?.value?.includes(q);
+        const vName = String(getFieldValue(inv.vendor) || '').toLowerCase();
+        const cName = String(getFieldValue(inv.customerName) || '').toLowerCase();
+        const invNum = String(getFieldValue(inv.invoiceNumber) || '').toLowerCase();
+        const gstNum = String(getFieldValue(inv.gstNumber) || '').toLowerCase();
+        const totAmt = String(getFieldValue(inv.totalAmount) ?? '');
+        const subAmt = String(getFieldValue(inv.subtotal) ?? '');
+        const invDate = String(getFieldValue(inv.date) || '');
+        const dueDate = String(getFieldValue(inv.dueDate) || '');
+        vendorMatch = vName.includes(q) || cName.includes(q);
+        invoiceNumberMatch = invNum.includes(q) || gstNum.includes(q);
+        amountMatch = totAmt.includes(q) || subAmt.includes(q);
+        dateMatch = invDate.includes(q) || dueDate.includes(q);
       }
     } else if (doc.documentType === 'purchase_order') {
       const po = doc.purchaseOrderData;
@@ -990,15 +1315,15 @@ function App() {
 
     let matchesVendor = true;
     if (filterVendor !== 'all') {
-      const invVendor = doc.invoiceData?.vendor?.value;
-      const poVendor = doc.purchaseOrderData?.vendor?.value;
-      const bsBank = doc.bankStatementData?.bankName?.value;
+      const invVendor = getFieldValue<string>(doc.invoiceData?.vendor);
+      const poVendor = getFieldValue<string>(doc.purchaseOrderData?.vendor);
+      const bsBank = getFieldValue<string>(doc.bankStatementData?.bankName);
       matchesVendor = invVendor === filterVendor || poVendor === filterVendor || bsBank === filterVendor;
     }
 
     let matchesDueDate = true;
     if (filterDueDate !== 'all') {
-      const dueDateStr = doc.invoiceData?.dueDate?.value;
+      const dueDateStr = getFieldValue<string>(doc.invoiceData?.dueDate);
       if (!dueDateStr) {
         matchesDueDate = false;
       } else {
@@ -1032,16 +1357,16 @@ function App() {
 
       case 'amount_desc': {
         const getAmt = (d: DocumentAnalysis) => {
-          if (d.documentType === 'invoice' || d.documentType === 'receipt') return d.invoiceData?.totalAmount?.value || 0;
-          if (d.documentType === 'purchase_order') return d.purchaseOrderData?.totalAmount?.value || 0;
+          if (d.documentType === 'invoice' || d.documentType === 'receipt') return getFieldValue<number>(d.invoiceData?.totalAmount, 0) || 0;
+          if (d.documentType === 'purchase_order') return getFieldValue<number>(d.purchaseOrderData?.totalAmount, 0) || 0;
           return 0;
         };
         return getAmt(b) - getAmt(a);
       }
       case 'amount_asc': {
         const getAmt = (d: DocumentAnalysis) => {
-          if (d.documentType === 'invoice' || d.documentType === 'receipt') return d.invoiceData?.totalAmount?.value || 0;
-          if (d.documentType === 'purchase_order') return d.purchaseOrderData?.totalAmount?.value || 0;
+          if (d.documentType === 'invoice' || d.documentType === 'receipt') return getFieldValue<number>(d.invoiceData?.totalAmount, 0) || 0;
+          if (d.documentType === 'purchase_order') return getFieldValue<number>(d.purchaseOrderData?.totalAmount, 0) || 0;
           return 0;
         };
         return getAmt(a) - getAmt(b);
@@ -1712,12 +2037,73 @@ function App() {
             )}
 
             <div className="flex-1 p-8">
-              {/* PROFESSIONAL MULTI-STAGE PROCESSING SCREEN */}
-              {isUploading && (
+              {/* Ingestion Failure Banner with One-Click Retry */}
+              {processingError && (
+                <div className="max-w-4xl mx-auto mb-6 bg-rose-500/10 border border-rose-500/20 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-lg">
+                  <div className="flex items-start gap-3.5">
+                    <AlertCircle className="text-rose-400 shrink-0 mt-0.5" size={22} />
+                    <div>
+                      <h4 className="text-rose-300 text-sm font-bold">Document Processing Failed</h4>
+                      <p className="text-gray-300 text-xs mt-1 leading-relaxed max-w-xl">{processingError}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                    {lastFailedFile && (
+                      <button
+                        onClick={() => processUploadedFile(lastFailedFile)}
+                        className="bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold px-4 py-2 rounded-xl transition shadow-md shadow-purple-600/20 flex items-center gap-1.5"
+                      >
+                        <FolderSync size={14} />
+                        <span>Retry Extraction</span>
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        setProcessingError(null);
+                        setLastFailedFile(null);
+                      }}
+                      className="text-gray-400 hover:text-white text-xs px-3 py-2 rounded-xl border border-gray-800 hover:bg-gray-900 transition"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Non-blocking Background Upload Notification Banner (when browsing other tabs) */}
+              {isUploading && activeTab !== 'upload' && (
+                <div className="max-w-5xl mx-auto mb-6 bg-gray-950 border border-purple-500/30 rounded-2xl p-4 flex items-center justify-between shadow-xl">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-5 h-5 rounded-full border-2 border-purple-500 border-t-transparent animate-spin shrink-0"></div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-white text-xs font-bold">{uploadStatusText}</span>
+                        {uploadingFileName && <span className="text-[11px] text-purple-400 font-mono">({uploadingFileName})</span>}
+                      </div>
+                      <p className="text-gray-400 text-[10px] mt-0.5">
+                        {isSlowProcessing
+                          ? "Complex layout detected — Gemini is analyzing tabular line items and tax schedules..."
+                          : "Processing in background. Your dashboard remains active."}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      abortControllerRef.current?.abort();
+                      setIsUploading(false);
+                    }}
+                    className="text-gray-400 hover:text-white text-xs font-semibold px-3 py-1.5 rounded-lg border border-gray-800 hover:border-gray-700 transition shrink-0"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              {/* DEDICATED UPLOAD VIEW PROCESSING CARD (shown only when in upload tab) */}
+              {isUploading && activeTab === 'upload' && (
                 <div className="max-w-xl mx-auto my-6 bg-gray-950 border border-gray-900 rounded-3xl p-8 flex flex-col shadow-2xl relative overflow-hidden">
                   <div className="absolute right-0 top-0 w-32 h-32 bg-purple-500/5 rounded-full blur-3xl"></div>
 
-                  {/* Top Header */}
                   <div className="flex flex-col items-center text-center mb-8">
                     <div className="relative w-16 h-16 mb-4">
                       <div className="absolute inset-0 rounded-full border-2 border-purple-500/10"></div>
@@ -1727,84 +2113,68 @@ function App() {
                       </div>
                     </div>
                     <h3 className="text-white text-lg font-bold">Document Extraction Pipeline</h3>
-                    <p className="text-gray-500 text-xs mt-1">Analyzing fields and validation schemas in real-time</p>
+                    <p className="text-gray-400 text-xs mt-1">{uploadStatusText}</p>
+                    {uploadingFileName && (
+                      <span className="text-[10px] text-purple-400 font-mono mt-1 bg-purple-500/10 px-2.5 py-1 rounded-full border border-purple-500/20">
+                        {uploadingFileName}
+                      </span>
+                    )}
                   </div>
 
-                  {/* Processing Error block */}
-                  {processingError ? (
-                    <div className="bg-rose-500/5 border border-rose-500/20 p-5 rounded-2xl flex flex-col items-center text-center gap-3">
-                      <AlertCircle className="text-rose-400 shrink-0" size={28} />
-                      <div className="space-y-1">
-                        <h4 className="text-rose-300 text-sm font-bold">Ingestion Blocked</h4>
-                        <p className="text-gray-400 text-xs leading-relaxed max-w-sm">{processingError}</p>
-                      </div>
-                      <button
-                        onClick={() => {
-                          setIsUploading(false);
-                          setProcessingError(null);
-                        }}
-                        className="mt-2 bg-gray-900 hover:bg-gray-800 text-white font-semibold text-xs py-2.5 px-4 rounded-xl border border-gray-800 transition"
-                      >
-                        Cancel & Return
-                      </button>
-                    </div>
-                  ) : (
-                    /* Stage items */
-                    <div className="space-y-6 relative pl-3">
-                      {/* Vertical line indicator */}
-                      <div className="absolute left-[21px] top-3 bottom-3 w-[2px] bg-gray-900">
-                        <div
-                          className="w-full bg-gradient-to-b from-emerald-500 to-purple-500 transition-all duration-500"
-                          style={{
-                            height: `${(processingStage / 5) * 100}%`,
-                            boxShadow: '0 0 8px rgba(168, 85, 247, 0.4)'
-                          }}
-                        ></div>
-                      </div>
+                  {/* Clean lightweight stages */}
+                  <div className="space-y-5 relative pl-3">
+                    {[
+                      { title: "Uploading Invoice", desc: "Sending document securely to FlowPilot server", stageIdx: 0 },
+                      { title: "Extracting Invoice Details & Currency", desc: "Running single-pass Gemini multi-modal parameter extraction", stageIdx: 1 },
+                      { title: "Finalizing & Persistence", desc: "Mathematical reconciliation and registry persistence", stageIdx: 2 }
+                    ].map((stage, idx) => {
+                      const isCompleted = processingStage > stage.stageIdx;
+                      const isActive = processingStage === stage.stageIdx;
 
-                      {[
-                        { title: "Uploading", desc: "Sending document to FlowPilot secure server" },
-                        { title: "Reading Document / OCR", desc: "Converting layout and text elements" },
-                        { title: "Detecting Document Type", desc: "Classifying format using layout analysis" },
-                        { title: "Extracting Information with Gemini", desc: "Running multi-modal AI extraction queries" },
-                        { title: "Validating Extracted Data", desc: "Running validation schemas and check rules" },
-                        { title: "Analysis Complete", desc: "Saving results to the local registry" }
-                      ].map((stage, idx) => {
-                        const isCompleted = processingStage > idx;
-                        const isActive = processingStage === idx;
-
-                        return (
-                          <div key={idx} className="flex items-start gap-4 relative z-10 transition-opacity duration-300">
-                            {/* Bullet icon */}
-                            <div className="flex items-center justify-center w-5 h-5 shrink-0 mt-0.5">
-                              {isCompleted ? (
-                                <CheckCircle2 className="text-emerald-400 bg-black rounded-full" size={18} />
-                              ) : isActive ? (
-                                <div className="w-4 h-4 rounded-full border-2 border-purple-500 border-t-transparent animate-spin bg-black"></div>
-                              ) : (
-                                <div className="w-3.5 h-3.5 rounded-full border-2 border-gray-800 bg-black"></div>
-                              )}
-                            </div>
-
-                            {/* Label & Description */}
-                            <div className="space-y-0.5">
-                              <h4 className={`text-xs font-bold transition-colors ${isCompleted ? 'text-emerald-400/90' : isActive ? 'text-purple-300 animate-pulse' : 'text-gray-500'
-                                }`}>
-                                {stage.title}
-                              </h4>
-                              <p className={`text-[10px] transition-colors ${isCompleted ? 'text-gray-500' : isActive ? 'text-gray-300 font-medium' : 'text-gray-600'
-                                }`}>
-                                {stage.desc}
-                              </p>
-                            </div>
+                      return (
+                        <div key={idx} className="flex items-start gap-4 relative z-10 transition-opacity duration-300">
+                          <div className="flex items-center justify-center w-5 h-5 shrink-0 mt-0.5">
+                            {isCompleted ? (
+                              <CheckCircle2 className="text-emerald-400 bg-black rounded-full" size={18} />
+                            ) : isActive ? (
+                              <div className="w-4 h-4 rounded-full border-2 border-purple-500 border-t-transparent animate-spin bg-black"></div>
+                            ) : (
+                              <div className="w-3.5 h-3.5 rounded-full border-2 border-gray-800 bg-black"></div>
+                            )}
                           </div>
-                        );
-                      })}
+                          <div className="space-y-0.5">
+                            <h4 className={`text-xs font-bold transition-colors ${
+                              isCompleted ? 'text-emerald-400/90' : isActive ? 'text-purple-300 animate-pulse' : 'text-gray-500'
+                            }`}>
+                              {stage.title}
+                            </h4>
+                            <p className={`text-[10px] transition-colors ${
+                              isCompleted ? 'text-gray-500' : isActive ? 'text-gray-300 font-medium' : 'text-gray-600'
+                            }`}>
+                              {stage.desc}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {isSlowProcessing && (
+                    <div className="mt-6 bg-amber-500/5 border border-amber-500/20 p-3 rounded-xl text-center text-xs text-amber-300">
+                      Complex tabular layout detected — Gemini is analyzing items and tax schedules. Thank you for your patience.
                     </div>
                   )}
 
-                  <div className="mt-8 text-center text-[10px] text-gray-600 font-mono">
-                    Gemini 3.8 Flash Ingest Pipeline v1.3
+                  <div className="mt-8 flex justify-center">
+                    <button
+                      onClick={() => {
+                        abortControllerRef.current?.abort();
+                        setIsUploading(false);
+                      }}
+                      className="text-gray-400 hover:text-white text-xs font-semibold px-4 py-2 rounded-xl border border-gray-800 hover:bg-gray-900 transition"
+                    >
+                      Cancel Upload
+                    </button>
                   </div>
                 </div>
               )}
@@ -1917,14 +2287,26 @@ function App() {
                             Cancel
                           </button>
                           <button
+                            disabled={isUploading}
                             onClick={async () => {
-                              if (pendingFile) {
+                              if (pendingFile && !isUploading) {
                                 await processUploadedFile(pendingFile);
                               }
                             }}
-                            className="flex-1 bg-purple-600 hover:bg-purple-700 text-white transition py-3 rounded-xl text-xs font-bold shadow-lg shadow-purple-600/15"
+                            className={`flex-1 transition py-3 rounded-xl text-xs font-bold shadow-lg flex items-center justify-center gap-2 ${
+                              isUploading
+                                ? 'bg-purple-600/50 text-purple-200 cursor-not-allowed shadow-none'
+                                : 'bg-purple-600 hover:bg-purple-700 text-white shadow-purple-600/15'
+                            }`}
                           >
-                            Analyze Document
+                            {isUploading ? (
+                              <>
+                                <div className="w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin"></div>
+                                <span>Processing...</span>
+                              </>
+                            ) : (
+                              <span>Analyze Document</span>
+                            )}
                           </button>
                         </div>
                       </div>
@@ -1934,7 +2316,7 @@ function App() {
               )}
 
               {/* OVERVIEW DASHBOARD */}
-              {!isUploading && !selectedDocument && activeTab === 'dashboard' && (
+              {!selectedDocument && activeTab === 'dashboard' && (
                 <div className="max-w-7xl mx-auto space-y-8">
                   {/* Dashboard Header */}
                   <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-gray-900 pb-5">
@@ -1950,7 +2332,7 @@ function App() {
                   </div>
 
                   {/* Primary KPIs & Status Widgets Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                  <div className={`grid grid-cols-1 sm:grid-cols-2 ${outstandingByCurrency.length > 2 ? 'md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7' : outstandingByCurrency.length === 2 ? 'md:grid-cols-3 lg:grid-cols-6' : 'lg:grid-cols-5'} gap-3.5`}>
                     <div className="bg-gray-950 border border-gray-900 rounded-2xl p-5 flex flex-col justify-between shadow-lg relative overflow-hidden">
                       <div className="absolute right-0 top-0 w-24 h-24 bg-purple-500/5 rounded-full blur-2xl"></div>
                       <span className="text-gray-500 text-[10px] font-semibold uppercase tracking-wider">Total Documents</span>
@@ -1959,14 +2341,47 @@ function App() {
                         <FileText size={18} className="text-purple-400" />
                       </div>
                     </div>
-                    <div className="bg-gray-950 border border-gray-900 rounded-2xl p-5 flex flex-col justify-between shadow-lg relative overflow-hidden">
-                      <div className="absolute right-0 top-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl"></div>
-                      <span className="text-gray-500 text-[10px] font-semibold uppercase tracking-wider">Total Outstanding</span>
-                      <div className="flex items-baseline justify-between mt-3">
-                        <span className="text-emerald-400 text-2xl font-extrabold">${outstandingAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                        <DollarSign size={18} className="text-emerald-400" />
+
+                    {/* Multi-Currency Total Outstanding Cards */}
+                    {outstandingByCurrency.length === 0 ? (
+                      <div className="bg-gray-950 border border-gray-900 rounded-2xl p-5 flex flex-col justify-between shadow-lg relative overflow-hidden">
+                        <div className="absolute right-0 top-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-2xl"></div>
+                        <span className="text-gray-500 text-[10px] font-semibold uppercase tracking-wider">Total Outstanding</span>
+                        <div className="flex items-baseline justify-between mt-3">
+                          <span className="text-emerald-400 text-2xl font-bold tracking-tight font-mono tabular-nums">₹0.00</span>
+                          <IndianRupee size={18} className="text-emerald-400" />
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      outstandingByCurrency.map((item) => (
+                        <div
+                          key={`kpi-outstanding-${item.currency}`}
+                          className="bg-gray-950 border border-gray-900 rounded-2xl p-5 flex flex-col justify-between shadow-lg relative overflow-hidden group hover:border-gray-800 transition-colors"
+                        >
+                          <div className={`absolute right-0 top-0 w-24 h-24 rounded-full blur-2xl ${item.currency === 'UNKNOWN' ? 'bg-amber-500/5' : 'bg-emerald-500/5'}`}></div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500 text-[10px] font-semibold uppercase tracking-wider">
+                              Total Outstanding · <span className={item.currency === 'UNKNOWN' ? 'text-amber-400 font-bold' : 'text-gray-300'}>{item.currency}</span>
+                            </span>
+                            <span className="text-[10px] text-gray-500 font-mono">
+                              {item.count} {item.count === 1 ? 'doc' : 'docs'}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline justify-between mt-3">
+                            <span
+                              className={`text-base sm:text-lg xl:text-xl font-bold tracking-tight font-mono tabular-nums whitespace-nowrap ${
+                                item.currency === 'UNKNOWN' ? 'text-amber-400' : 'text-emerald-400'
+                              }`}
+                              title={formatCurrency(item.total, item.currency)}
+                            >
+                              {formatCurrency(item.total, item.currency)}
+                            </span>
+                            {getCurrencyIcon(item.currency, 18, item.currency === 'UNKNOWN' ? 'text-amber-400 shrink-0 ml-1' : 'text-emerald-400 shrink-0 ml-1')}
+                          </div>
+                        </div>
+                      ))
+                    )}
+
                     <div className="bg-gray-950 border border-gray-900 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
                       <span className="text-gray-500 text-[10px] font-semibold uppercase tracking-wider">Pending Audit</span>
                       <div className="flex items-baseline justify-between mt-3">
@@ -2229,24 +2644,37 @@ function App() {
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     {/* Quick upload zone */}
                     <div className="lg:col-span-1 bg-gray-950 border border-gray-900 rounded-3xl p-6 flex flex-col justify-center min-h-[260px]">
-                      <div
-                        onDragEnter={handleDrag}
-                        onDragOver={handleDrag}
-                        onDragLeave={handleDrag}
-                        onDrop={handleDrop}
-                        onClick={() => fileInputRef.current?.click()}
-                        className={`border border-dashed rounded-2xl p-6 text-center cursor-pointer transition duration-200 flex flex-col items-center justify-center h-full ${dragActive
-                          ? 'border-purple-500 bg-purple-500/5'
-                          : 'border-gray-800 bg-black/40 hover:border-gray-700'
-                          }`}
-                      >
-                        <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="application/pdf,image/*,text/plain" className="hidden" />
-                        <FileUp className="text-purple-400 mb-3" size={24} />
-                        <h4 className="text-white text-sm font-bold">Quick Ingestion upload</h4>
-                        <p className="text-gray-500 text-[10px] mt-1 max-w-[200px] leading-relaxed">
-                          Drag and drop files to trigger classification and extraction.
-                        </p>
-                      </div>
+                      {isUploading ? (
+                        <div className="border border-purple-500/30 bg-purple-500/5 rounded-2xl p-6 text-center flex flex-col items-center justify-center h-full">
+                          <div className="w-8 h-8 rounded-full border-2 border-purple-500 border-t-transparent animate-spin mb-3"></div>
+                          <h4 className="text-white text-sm font-bold">Processing Document</h4>
+                          <p className="text-purple-300 text-xs mt-1.5 font-medium">{uploadStatusText}</p>
+                          {uploadingFileName && (
+                            <span className="text-[10px] text-gray-500 font-mono mt-1 truncate max-w-[200px]">
+                              {uploadingFileName}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div
+                          onDragEnter={handleDrag}
+                          onDragOver={handleDrag}
+                          onDragLeave={handleDrag}
+                          onDrop={handleDrop}
+                          onClick={() => fileInputRef.current?.click()}
+                          className={`border border-dashed rounded-2xl p-6 text-center cursor-pointer transition duration-200 flex flex-col items-center justify-center h-full ${dragActive
+                            ? 'border-purple-500 bg-purple-500/5'
+                            : 'border-gray-800 bg-black/40 hover:border-gray-700'
+                            }`}
+                        >
+                          <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="application/pdf,image/*,text/plain" className="hidden" />
+                          <FileUp className="text-purple-400 mb-3" size={24} />
+                          <h4 className="text-white text-sm font-bold">Quick Ingestion upload</h4>
+                          <p className="text-gray-500 text-[10px] mt-1 max-w-[200px] leading-relaxed">
+                            Drag and drop files to trigger classification and extraction.
+                          </p>
+                        </div>
+                      )}
                     </div>
 
                     {/* Recent Documents list */}
@@ -2428,12 +2856,11 @@ function App() {
                                 {doc.summary}
                               </p>
 
-                              {isInvoice && doc.invoiceData?.totalAmount?.value !== undefined && (
+                              {isInvoice && getFieldValue(doc.invoiceData?.totalAmount) !== null && (
                                 <div className="bg-black/50 border border-gray-900 rounded-xl p-3 flex justify-between items-center">
                                   <span className="text-[10px] text-gray-500 font-semibold uppercase">Invoice Sum</span>
-                                  <span className="text-white text-sm font-bold">
-                                    {doc.invoiceData.currency?.value || '$'}
-                                    {doc.invoiceData.totalAmount.value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                  <span className="text-white text-sm font-bold font-mono">
+                                    {formatCurrency(getFieldValue<number>(doc.invoiceData?.totalAmount), getDocumentCurrency(doc))}
                                   </span>
                                 </div>
                               )}
@@ -2827,169 +3254,451 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
 
                       {/* Dynamic Metadata Fields */}
                       <div className="bg-gray-950 border border-gray-900 rounded-3xl p-6 shadow-lg">
-                        <h4 className="text-white text-xs font-bold uppercase tracking-wider mb-5 flex items-center gap-2 border-b border-gray-900 pb-3">
-                          <Database className="text-purple-400" size={14} />
-                          Structured Parameter Extraction
-                        </h4>
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-900 pb-3 mb-5">
+                          <h4 className="text-white text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+                            <Database className="text-purple-400" size={14} />
+                            Structured Parameter Extraction
+                          </h4>
+                          {selectedDocument.modelUsed && (
+                            <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-300 self-start sm:self-auto">
+                              Engine: {selectedDocument.modelUsed}
+                            </span>
+                          )}
+                        </div>
 
                         {/* Invoice/Receipt */}
-                        {(selectedDocument.documentType === 'invoice' || selectedDocument.documentType === 'receipt') && selectedDocument.invoiceData && (
-                          <div className="space-y-6">
-                            {/* Total Amount highlighted widget */}
-                            <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                              <div>
-                                <span className="text-gray-400 text-[10px] font-bold uppercase tracking-wider">Parsed Total Amount</span>
-                                <h3 className="text-emerald-400 text-2xl font-extrabold mt-1">
-                                  {selectedDocument.invoiceData.currency?.value || '$'}
-                                  {selectedDocument.invoiceData.totalAmount?.value?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || '0.00'}
-                                  {selectedDocument.invoiceData.totalAmount && renderConfidenceBadge(selectedDocument.invoiceData.totalAmount.confidence)}
-                                </h3>
-                              </div>
-                              <div className="text-right space-y-1.5 text-xs text-gray-400">
+                        {(selectedDocument.documentType === 'invoice' || selectedDocument.documentType === 'receipt' || !!selectedDocument.invoiceData) && (selectedDocument.invoiceData ? (() => {
+                          const inv = selectedDocument.invoiceData || {};
+                          const curr = getDocumentCurrency(selectedDocument);
+                          const totalAmt = getFieldValue<number>(inv.totalAmount);
+                          const subtotalAmt = getFieldValue<number>(inv.subtotal);
+                          const grossSubtotalAmt = getFieldValue<number>(inv.grossSubtotal);
+                          const netTaxableSubtotalAmt = getFieldValue<number>(inv.netTaxableSubtotal);
+                          const taxAmt = getFieldValue<number>(inv.tax);
+                          const totalGstAmt = getFieldValue<number>(inv.totalGst);
+                          const cgstAmt = getFieldValue<number>(inv.cgst);
+                          const sgstAmt = getFieldValue<number>(inv.sgst);
+                          const igstAmt = getFieldValue<number>(inv.igst);
+                          const vatAmt = getFieldValue<number>(inv.vat);
+                          const salesTaxAmt = getFieldValue<number>(inv.salesTax);
+                          const otherTaxesAmt = getFieldValue<number>(inv.otherTaxes);
+                          const taxRatesStr = getFieldValue<string>(inv.taxRates);
+                          const roundOffAmt = getFieldValue<number>(inv.roundOff);
+                          const discountAmt = getFieldValue<number>(inv.discount);
+                          const shippingAmt = getFieldValue<number>(inv.shipping);
+                          const freightAmt = getFieldValue<number>(inv.freight);
+                          const otherChargesAmt = getFieldValue<number>(inv.otherCharges);
+                          const amountPaidAmt = getFieldValue<number>(inv.amountPaid);
+                          const balanceDueAmt = getFieldValue<number>(inv.balanceDue);
+                          const paymentStatusStr = getFieldValue<string>(inv.paymentStatus);
+                          const vendorStr = getFieldValue<string>(inv.vendor);
+                          const vendorAddressStr = getFieldValue<string>(inv.vendorAddress);
+                          const customerStr = getFieldValue<string>(inv.customerName);
+                          const customerAddressStr = getFieldValue<string>(inv.customerAddress);
+                          const customerGstinStr = getFieldValue<string>(inv.customerGstin);
+                          const invoiceNumStr = getFieldValue<string>(inv.invoiceNumber);
+                          const dateStr = getFieldValue<string>(inv.date);
+                          const dueDateStr = getFieldValue<string>(inv.dueDate);
+                          const gstNumStr = getFieldValue<string>(inv.gstNumber);
+                          const paymentTermsStr = getFieldValue<string>(inv.paymentTerms);
+                          const emailStr = getFieldValue<string>(inv.email);
+                          const phoneStr = getFieldValue<string>(inv.phone);
+                          const poNumStr = getFieldValue<string>(inv.poNumber);
+                          const hsnSacStr = getFieldValue<string>(inv.hsnSac);
+                          const lineItemsArr = getFieldValue<any[]>(inv.lineItems) || [];
+
+                          const hasGstBreakdown = (cgstAmt !== null && cgstAmt !== undefined) ||
+                            (sgstAmt !== null && sgstAmt !== undefined) ||
+                            (igstAmt !== null && igstAmt !== undefined) ||
+                            (totalGstAmt !== null && totalGstAmt !== undefined);
+
+                          return (
+                            <div className="space-y-6">
+                              {/* Total Amount highlighted widget */}
+                              <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                                 <div>
-                                  <span className="text-gray-500 font-bold uppercase text-[10px]">Taxes / GST: </span>
-                                  <strong className="text-white font-mono">
-                                    {selectedDocument.invoiceData.currency?.value || '$'}
-                                    {selectedDocument.invoiceData.tax?.value?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || '0.00'}
-                                  </strong>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-gray-400 text-[10px] font-bold uppercase tracking-wider">Parsed Total Amount</span>
+                                    {curr === 'UNKNOWN' && (
+                                      <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                        Unknown Currency
+                                      </span>
+                                    )}
+                                  </div>
+                                  <h3 className="text-emerald-400 text-2xl font-bold mt-1 font-mono tabular-nums tracking-tight">
+                                    {formatCurrency(totalAmt, curr)}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.totalAmount))}
+                                  </h3>
+                                  {paymentStatusStr && (
+                                    <span className="inline-block mt-2 text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                                      Status: {paymentStatusStr}
+                                    </span>
+                                  )}
                                 </div>
-                                {selectedDocument.invoiceData.shipping?.value !== undefined && selectedDocument.invoiceData.shipping.value !== null && (
+                                <div className="text-right space-y-1.5 text-xs text-gray-400">
                                   <div>
-                                    <span className="text-gray-500 font-bold uppercase text-[10px]">Shipping: </span>
+                                    <span className="text-gray-500 font-bold uppercase text-[10px]">Taxes / GST: </span>
                                     <strong className="text-white font-mono">
-                                      {selectedDocument.invoiceData.currency?.value || '$'}
-                                      {selectedDocument.invoiceData.shipping.value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                      {formatCurrency(taxAmt, curr)}
                                     </strong>
+                                    {renderConfidenceBadge(getFieldConfidence(inv.tax))}
                                   </div>
-                                )}
-                                {selectedDocument.invoiceData.discount?.value !== undefined && selectedDocument.invoiceData.discount.value !== null && (
-                                  <div>
-                                    <span className="text-gray-500 font-bold uppercase text-[10px]">Discount: </span>
-                                    <strong className="text-emerald-400 font-mono">
-                                      -{selectedDocument.invoiceData.currency?.value || '$'}
-                                      {selectedDocument.invoiceData.discount.value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                    </strong>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Details grid */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Vendor / Payee</span>
-                                <span className="text-white font-bold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.vendor?.value || <span className="text-rose-400">Not Found</span>}
-                                  {selectedDocument.invoiceData.vendor && renderConfidenceBadge(selectedDocument.invoiceData.vendor.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Customer / Client</span>
-                                <span className="text-white font-bold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.customerName?.value || <span className="text-gray-600">Not Found</span>}
-                                  {selectedDocument.invoiceData.customerName && renderConfidenceBadge(selectedDocument.invoiceData.customerName.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Invoice ID Number</span>
-                                <span className="text-white font-bold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.invoiceNumber?.value || <span className="text-rose-400">Not Found</span>}
-                                  {selectedDocument.invoiceData.invoiceNumber && renderConfidenceBadge(selectedDocument.invoiceData.invoiceNumber.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Payment Terms</span>
-                                <span className="text-white font-bold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.paymentTerms?.value || <span className="text-gray-600">Not Specified</span>}
-                                  {selectedDocument.invoiceData.paymentTerms && renderConfidenceBadge(selectedDocument.invoiceData.paymentTerms.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Invoice Date</span>
-                                <span className="text-white font-semibold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.date?.value || <span className="text-gray-600">Not Specified</span>}
-                                  {selectedDocument.invoiceData.date && renderConfidenceBadge(selectedDocument.invoiceData.date.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Due Date</span>
-                                <span className="text-white font-semibold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.dueDate?.value || <span className="text-gray-600">Not Specified</span>}
-                                  {selectedDocument.invoiceData.dueDate && renderConfidenceBadge(selectedDocument.invoiceData.dueDate.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Subtotal</span>
-                                <span className="text-white font-semibold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.currency?.value || '$'}
-                                  {selectedDocument.invoiceData.subtotal?.value?.toLocaleString() || '0.00'}
-                                  {selectedDocument.invoiceData.subtotal && renderConfidenceBadge(selectedDocument.invoiceData.subtotal.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">GST Number</span>
-                                <span className="text-white font-semibold text-xs mt-1.5 inline-block">
-                                  {selectedDocument.invoiceData.gstNumber?.value || <span className="text-amber-400 flex items-center gap-1"><AlertCircle size={10} /> Missing GST</span>}
-                                  {selectedDocument.invoiceData.gstNumber?.value && renderConfidenceBadge(selectedDocument.invoiceData.gstNumber.confidence)}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Email</span>
-                                <span className="text-white font-semibold text-xs mt-1.5 inline-block truncate">
-                                  {selectedDocument.invoiceData.email?.value || <span className="text-gray-600">Not Found</span>}
-                                </span>
-                              </div>
-
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Phone</span>
-                                <span className="text-white font-semibold text-xs mt-1.5 inline-block truncate">
-                                  {selectedDocument.invoiceData.phone?.value || <span className="text-gray-600">Not Found</span>}
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Line Items Table */}
-                            {selectedDocument.invoiceData.lineItems?.value && selectedDocument.invoiceData.lineItems.value.length > 0 && (
-                              <div className="bg-black/50 border border-gray-900 rounded-xl p-4 space-y-3">
-                                <span className="text-gray-500 text-[10px] uppercase font-bold block">Invoice Line Items</span>
-                                <div className="overflow-x-auto">
-                                  <table className="w-full text-left text-xs border-collapse">
-                                    <thead>
-                                      <tr className="border-b border-gray-900 text-gray-500">
-                                        <th className="py-2 font-bold uppercase text-[10px]">Description</th>
-                                        <th className="py-2 text-right font-bold uppercase text-[10px]">Qty</th>
-                                        <th className="py-2 text-right font-bold uppercase text-[10px]">Unit Price</th>
-                                        <th className="py-2 text-right font-bold uppercase text-[10px]">Amount</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-gray-950">
-                                      {selectedDocument.invoiceData.lineItems.value.map((item, idx) => (
-                                        <tr key={idx} className="text-gray-300">
-                                          <td className="py-2 font-semibold">{item.description}</td>
-                                          <td className="py-2 text-right font-mono">{item.quantity !== null && item.quantity !== undefined ? item.quantity : '-'}</td>
-                                          <td className="py-2 text-right font-mono">
-                                            {item.unitPrice !== null && item.unitPrice !== undefined ? (selectedDocument.invoiceData?.currency?.value || '$') + item.unitPrice.toLocaleString() : '-'}
-                                          </td>
-                                          <td className="py-2 text-right font-mono font-bold text-white">
-                                            {item.amount !== null && item.amount !== undefined ? (selectedDocument.invoiceData?.currency?.value || '$') + item.amount.toLocaleString() : '-'}
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
+                                  {grossSubtotalAmt !== null && grossSubtotalAmt !== undefined && (
+                                    <div>
+                                      <span className="text-gray-500 font-bold uppercase text-[10px]">Gross Subtotal: </span>
+                                      <strong className="text-gray-300 font-mono">
+                                        {formatCurrency(grossSubtotalAmt, curr)}
+                                      </strong>
+                                    </div>
+                                  )}
+                                  {subtotalAmt !== null && subtotalAmt !== undefined && (
+                                    <div>
+                                      <span className="text-gray-500 font-bold uppercase text-[10px]">Subtotal: </span>
+                                      <strong className="text-gray-300 font-mono">
+                                        {formatCurrency(subtotalAmt, curr)}
+                                      </strong>
+                                    </div>
+                                  )}
+                                  {shippingAmt !== null && shippingAmt !== undefined && (
+                                    <div>
+                                      <span className="text-gray-500 font-bold uppercase text-[10px]">Shipping: </span>
+                                      <strong className="text-white font-mono">
+                                        {formatCurrency(shippingAmt, curr)}
+                                      </strong>
+                                    </div>
+                                  )}
+                                  {discountAmt !== null && discountAmt !== undefined && (
+                                    <div>
+                                      <span className="text-gray-500 font-bold uppercase text-[10px]">Discount: </span>
+                                      <strong className="text-emerald-400 font-mono">
+                                        -{formatCurrency(discountAmt, curr)}
+                                      </strong>
+                                    </div>
+                                  )}
+                                  {amountPaidAmt !== null && amountPaidAmt !== undefined && (
+                                    <div>
+                                      <span className="text-gray-500 font-bold uppercase text-[10px]">Amount Paid: </span>
+                                      <strong className="text-emerald-400 font-mono">
+                                        {formatCurrency(amountPaidAmt, curr)}
+                                      </strong>
+                                    </div>
+                                  )}
+                                  {balanceDueAmt !== null && balanceDueAmt !== undefined && (
+                                    <div>
+                                      <span className="text-gray-500 font-bold uppercase text-[10px]">Balance Due: </span>
+                                      <strong className="text-rose-400 font-mono">
+                                        {formatCurrency(balanceDueAmt, curr)}
+                                      </strong>
+                                    </div>
+                                  )}
                                 </div>
                               </div>
+
+                              {/* GST & Tax Breakdown Section */}
+                              {(hasGstBreakdown || taxRatesStr || (roundOffAmt !== null && roundOffAmt !== undefined && roundOffAmt !== 0) || netTaxableSubtotalAmt !== null) && (
+                                <div className="bg-black/40 border border-gray-900 rounded-2xl p-4">
+                                  <div className="flex items-center justify-between mb-3 border-b border-gray-900 pb-2">
+                                    <span className="text-gray-400 text-[10px] uppercase font-bold tracking-wider">
+                                      Taxation & Subtotal Breakdown
+                                    </span>
+                                    {taxRatesStr && (
+                                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20 font-semibold">
+                                        Rate: {taxRatesStr}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                    {netTaxableSubtotalAmt !== null && netTaxableSubtotalAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">Taxable Amount</span>
+                                        <span className="text-white font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(netTaxableSubtotalAmt, curr)}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {totalGstAmt !== null && totalGstAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">Total GST</span>
+                                        <span className="text-emerald-400 font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(totalGstAmt, curr)}
+                                          {renderConfidenceBadge(getFieldConfidence(inv.totalGst))}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {cgstAmt !== null && cgstAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">CGST</span>
+                                        <span className="text-emerald-400 font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(cgstAmt, curr)}
+                                          {renderConfidenceBadge(getFieldConfidence(inv.cgst))}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {sgstAmt !== null && sgstAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">SGST</span>
+                                        <span className="text-emerald-400 font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(sgstAmt, curr)}
+                                          {renderConfidenceBadge(getFieldConfidence(inv.sgst))}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {igstAmt !== null && igstAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">IGST</span>
+                                        <span className="text-sky-400 font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(igstAmt, curr)}
+                                          {renderConfidenceBadge(getFieldConfidence(inv.igst))}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {vatAmt !== null && vatAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">VAT</span>
+                                        <span className="text-white font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(vatAmt, curr)}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {salesTaxAmt !== null && salesTaxAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">Sales Tax</span>
+                                        <span className="text-white font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(salesTaxAmt, curr)}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {otherTaxesAmt !== null && otherTaxesAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">Other Taxes</span>
+                                        <span className="text-white font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(otherTaxesAmt, curr)}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {freightAmt !== null && freightAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">Freight</span>
+                                        <span className="text-white font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(freightAmt, curr)}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {otherChargesAmt !== null && otherChargesAmt !== undefined && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">Other Charges</span>
+                                        <span className="text-white font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(otherChargesAmt, curr)}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {roundOffAmt !== null && roundOffAmt !== undefined && roundOffAmt !== 0 && (
+                                      <div className="bg-black/60 border border-gray-900 p-2.5 rounded-xl">
+                                        <span className="text-[10px] text-gray-500 block uppercase font-bold">Round Off</span>
+                                        <span className="text-gray-300 font-mono font-bold text-xs mt-1 block">
+                                          {formatCurrency(roundOffAmt, curr)}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Details grid */}
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Vendor / Payee</span>
+                                  <span className="text-white font-bold text-xs mt-1.5 inline-block">
+                                    {vendorStr || <span className="text-rose-400">Not Detected</span>}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.vendor))}
+                                  </span>
+                                  {vendorAddressStr && (
+                                    <span className="text-gray-400 text-[11px] mt-1 block leading-snug">
+                                      {vendorAddressStr}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Customer / Client</span>
+                                  <span className="text-white font-bold text-xs mt-1.5 inline-block">
+                                    {customerStr || <span className="text-gray-600">Not Detected</span>}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.customerName))}
+                                  </span>
+                                  {customerAddressStr && (
+                                    <span className="text-gray-400 text-[11px] mt-1 block leading-snug">
+                                      {customerAddressStr}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Invoice ID Number</span>
+                                  <span className="text-white font-bold text-xs mt-1.5 inline-block font-mono">
+                                    {invoiceNumStr || <span className="text-rose-400 font-sans">Not Detected</span>}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.invoiceNumber))}
+                                  </span>
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Payment Terms</span>
+                                  <span className="text-white font-bold text-xs mt-1.5 inline-block">
+                                    {paymentTermsStr || <span className="text-gray-600">Not Specified</span>}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.paymentTerms))}
+                                  </span>
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Invoice Date</span>
+                                  <span className="text-white font-semibold text-xs mt-1.5 inline-block">
+                                    {dateStr || <span className="text-gray-600">Not Specified</span>}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.date))}
+                                  </span>
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Due Date</span>
+                                  <span className="text-white font-semibold text-xs mt-1.5 inline-block">
+                                    {dueDateStr || <span className="text-gray-600">Not Specified</span>}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.dueDate))}
+                                  </span>
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Subtotal</span>
+                                  <span className="text-white font-semibold text-xs mt-1.5 inline-block font-mono">
+                                    {formatCurrency(subtotalAmt, curr)}
+                                    {renderConfidenceBadge(getFieldConfidence(inv.subtotal))}
+                                  </span>
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">GST Number / Tax ID</span>
+                                  <span className="text-white font-semibold text-xs mt-1.5 inline-block font-mono">
+                                    {gstNumStr ? (
+                                      <>
+                                        {gstNumStr}
+                                        {renderConfidenceBadge(getFieldConfidence(inv.gstNumber))}
+                                      </>
+                                    ) : (
+                                      <span className="text-amber-400 flex items-center gap-1 font-sans"><AlertCircle size={10} /> Missing / Not Detected</span>
+                                    )}
+                                  </span>
+                                </div>
+
+                                {customerGstinStr && (
+                                  <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                    <span className="text-gray-500 text-[10px] uppercase font-bold block">Customer GSTIN</span>
+                                    <span className="text-white font-semibold text-xs mt-1.5 inline-block font-mono">
+                                      {customerGstinStr}
+                                      {renderConfidenceBadge(getFieldConfidence(inv.customerGstin))}
+                                    </span>
+                                  </div>
+                                )}
+
+                                {poNumStr && (
+                                  <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                    <span className="text-gray-500 text-[10px] uppercase font-bold block">PO Number</span>
+                                    <span className="text-white font-semibold text-xs mt-1.5 inline-block font-mono">
+                                      {poNumStr}
+                                      {renderConfidenceBadge(getFieldConfidence(inv.poNumber))}
+                                    </span>
+                                  </div>
+                                )}
+
+                                {hsnSacStr && (
+                                  <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                    <span className="text-gray-500 text-[10px] uppercase font-bold block">HSN / SAC Code</span>
+                                    <span className="text-white font-semibold text-xs mt-1.5 inline-block font-mono">
+                                      {hsnSacStr}
+                                      {renderConfidenceBadge(getFieldConfidence(inv.hsnSac))}
+                                    </span>
+                                  </div>
+                                )}
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Contact Email</span>
+                                  <span className="text-white font-semibold text-xs mt-1.5 inline-block truncate">
+                                    {emailStr || <span className="text-gray-600">Not Detected</span>}
+                                  </span>
+                                </div>
+
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4">
+                                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Contact Phone</span>
+                                  <span className="text-white font-semibold text-xs mt-1.5 inline-block truncate">
+                                    {phoneStr || <span className="text-gray-600">Not Detected</span>}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Line Items Table */}
+                              {lineItemsArr && lineItemsArr.length > 0 && (
+                                <div className="bg-black/50 border border-gray-900 rounded-xl p-4 space-y-3">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500 text-[10px] uppercase font-bold block">Invoice Line Items ({lineItemsArr.length})</span>
+                                    {renderConfidenceBadge(getFieldConfidence(inv.lineItems))}
+                                  </div>
+                                  <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-xs border-collapse">
+                                      <thead>
+                                        <tr className="border-b border-gray-900 text-gray-500">
+                                          <th className="py-2 font-bold uppercase text-[10px]">Description</th>
+                                          <th className="py-2 text-right font-bold uppercase text-[10px]">Qty</th>
+                                          <th className="py-2 text-right font-bold uppercase text-[10px]">Unit Price</th>
+                                          <th className="py-2 text-right font-bold uppercase text-[10px]">Taxable Amount</th>
+                                          <th className="py-2 text-right font-bold uppercase text-[10px]">Amount</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-gray-950">
+                                        {lineItemsArr.map((item, idx) => {
+                                          const desc = item.description || `Item #${idx + 1}`;
+                                          const qty = item.quantity !== null && item.quantity !== undefined ? item.quantity : '-';
+                                          const uPrice = item.unitPrice !== null && item.unitPrice !== undefined ? formatCurrency(item.unitPrice, curr) : '-';
+                                          const taxable = item.taxableAmount !== null && item.taxableAmount !== undefined
+                                            ? formatCurrency(item.taxableAmount, curr)
+                                            : (item.quantity !== null && item.quantity !== undefined && item.unitPrice !== null && item.unitPrice !== undefined
+                                              ? formatCurrency(item.quantity * item.unitPrice, curr)
+                                              : '-');
+                                          const amt = item.amount !== null && item.amount !== undefined ? formatCurrency(item.amount, curr) : '-';
+                                          return (
+                                            <tr key={idx} className="text-gray-300">
+                                              <td className="py-2 font-semibold">{desc}</td>
+                                              <td className="py-2 text-right font-mono">{qty}</td>
+                                              <td className="py-2 text-right font-mono">{uPrice}</td>
+                                              <td className="py-2 text-right font-mono text-gray-400">{taxable}</td>
+                                              <td className="py-2 text-right font-mono font-bold text-white">{amt}</td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })() : (
+                          <div className="bg-black/40 border border-gray-900 rounded-2xl p-6 text-center space-y-3">
+                            <AlertCircle size={24} className="text-amber-400 mx-auto" />
+                            <h5 className="text-white text-xs font-bold">Structured invoice parameters not yet extracted.</h5>
+                            <p className="text-gray-400 text-xs max-w-md mx-auto">
+                              The document summary was preserved above. You can trigger AI re-extraction at any time without re-uploading.
+                            </p>
+                            {reprocessError && (
+                              <p className="text-rose-400 text-xs bg-rose-500/10 border border-rose-500/20 rounded-lg p-2 max-w-md mx-auto">
+                                {reprocessError}
+                              </p>
                             )}
+                            <button
+                              onClick={() => handleReprocessDocument(selectedDocument.id)}
+                              disabled={isReprocessing}
+                              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold transition cursor-pointer disabled:opacity-50"
+                            >
+                              <RefreshCw size={13} className={isReprocessing ? 'animate-spin' : ''} />
+                              {isReprocessing ? 'Reprocessing...' : 'Extract Invoice Parameters'}
+                            </button>
                           </div>
-                        )}
+                        ))}
 
                         {/* Contract */}
                         {selectedDocument.documentType === 'contract' && selectedDocument.contractData && (
@@ -3317,25 +4026,11 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                           {/* 4. High-value Warning */}
                           {(() => {
                             if (selectedDocument.documentType !== 'invoice' && selectedDocument.documentType !== 'receipt') return null;
-                            const currency = selectedDocument.invoiceData?.currency?.value || 'USD';
-                            const amount = selectedDocument.invoiceData?.totalAmount?.value || 0;
-                            let currencyCode = 'USD';
-                            let symbol = '$';
-                            const upper = currency.toUpperCase().trim();
-                            if (upper === 'INR' || upper === '₹' || upper === 'RS') {
-                              currencyCode = 'INR';
-                              symbol = '₹';
-                            } else if (upper === 'EUR' || upper === '€') {
-                              currencyCode = 'EUR';
-                              symbol = '€';
-                            } else if (upper === 'GBP' || upper === '£') {
-                              currencyCode = 'GBP';
-                              symbol = '£';
-                            } else {
-                              currencyCode = upper;
-                              symbol = currency;
-                            }
-                            const threshold = Number(settings[`threshold_${currencyCode}`]) || 5000;
+                            const currencyCode = getDocumentCurrency(selectedDocument);
+                            if (currencyCode === 'UNKNOWN') return null;
+                            const amount = getFieldValue<number>(selectedDocument.invoiceData?.totalAmount, 0) || 0;
+                            const defaultThreshold = currencyCode === 'INR' ? 100000 : 5000;
+                            const threshold = Number(settings[`threshold_${currencyCode}`]) || defaultThreshold;
                             if (amount > threshold) {
                               return (
                                 <div className="bg-amber-500/5 border border-amber-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
@@ -3343,7 +4038,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                                   <div>
                                     <h5 className="text-amber-400 text-[11px] font-bold">High Value Invoice</h5>
                                     <p className="text-gray-500 text-[10px] mt-0.5 leading-relaxed">
-                                      This invoice exceeds {symbol}{threshold.toLocaleString()} and requires an extra level of manager approval.
+                                      This invoice exceeds {formatCurrency(threshold, currencyCode)} and requires an extra level of manager approval.
                                     </p>
                                   </div>
                                 </div>
@@ -3353,7 +4048,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                           })()}
 
                           {/* Missing Required Field: Due Date */}
-                          {(selectedDocument.documentType === 'invoice' || selectedDocument.documentType === 'receipt') && !selectedDocument.invoiceData?.dueDate?.value && (
+                          {(selectedDocument.documentType === 'invoice' || selectedDocument.documentType === 'receipt') && !getFieldValue(selectedDocument.invoiceData?.dueDate) && (
                             <div className="bg-amber-500/5 border border-amber-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
                               <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={16} />
                               <div>
@@ -3368,7 +4063,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                           {/* Missing critical fields warnings */}
                           {(selectedDocument.documentType === 'invoice' || selectedDocument.documentType === 'receipt') && (
                             <>
-                              {!selectedDocument.invoiceData?.vendor?.value && (
+                              {!getFieldValue(selectedDocument.invoiceData?.vendor) && (
                                 <div className="bg-amber-500/5 border border-amber-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
                                   <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={16} />
                                   <div>
@@ -3379,7 +4074,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                                   </div>
                                 </div>
                               )}
-                              {!selectedDocument.invoiceData?.invoiceNumber?.value && (
+                              {!getFieldValue(selectedDocument.invoiceData?.invoiceNumber) && (
                                 <div className="bg-amber-500/5 border border-amber-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
                                   <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={16} />
                                   <div>
@@ -3390,7 +4085,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
                                   </div>
                                 </div>
                               )}
-                              {!selectedDocument.invoiceData?.date?.value && (
+                              {!getFieldValue(selectedDocument.invoiceData?.date) && (
                                 <div className="bg-amber-500/5 border border-amber-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
                                   <AlertCircle className="text-amber-400 shrink-0 mt-0.5" size={16} />
                                   <div>
@@ -3406,7 +4101,7 @@ Section 12. Miscellaneous: The Client reserves the right to terminate the contra
 
                           {/* Safe check */}
                           {!selectedDocument.isDuplicate && !selectedDocument.amountMismatch && !selectedDocument.missingGst &&
-                            (!selectedDocument.invoiceData || (selectedDocument.invoiceData.vendor?.value && selectedDocument.invoiceData.invoiceNumber?.value)) && (
+                            (!selectedDocument.invoiceData || (getFieldValue(selectedDocument.invoiceData.vendor) && getFieldValue(selectedDocument.invoiceData.invoiceNumber))) && (
                               <div className="bg-emerald-500/5 border border-emerald-500/15 p-3.5 rounded-xl flex items-start gap-2.5">
                                 <CheckCircle2 className="text-emerald-400 shrink-0 mt-0.5" size={16} />
                                 <div>

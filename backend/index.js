@@ -94,6 +94,581 @@ if (!geminiApiKey) {
 }
 const genAI = new GoogleGenerativeAI(geminiApiKey || "");
 
+/**
+ * Normalization utilities to guarantee consistent { value, confidence } format
+ * for all extracted fields, parsing numeric values with currency symbols and commas,
+ * preserving valid zero values, and maintaining backward compatibility.
+ */
+function parseNumeric(val) {
+  if (val === null || val === undefined) return null;
+  if (typeof val === 'number') return isNaN(val) ? null : val;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (trimmed === '' || /^n\/?a$/i.test(trimmed) || /^null$/i.test(trimmed) || /^undefined$/i.test(trimmed)) return null;
+    const cleaned = trimmed.replace(/[₹$€£,\s]|INR|USD|EUR|GBP|Rs\.?/gi, '');
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? null : num;
+  }
+  return null;
+}
+
+function parseString(val) {
+  if (val === null || val === undefined) return null;
+  if (typeof val === 'object') return null;
+  const str = String(val).trim();
+  if (str === '' || /^n\/?a$/i.test(str) || /^null$/i.test(str) || /^undefined$/i.test(str)) return null;
+  return str;
+}
+
+function getRawField(obj, keys) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  for (const k of keys) {
+    if (k in obj && obj[k] !== undefined && obj[k] !== null) {
+      return obj[k];
+    }
+  }
+  return undefined;
+}
+
+function normalizeField(rawVal, type = 'string', defaultConfidence = 0.95) {
+  let val = rawVal;
+  let conf = defaultConfidence;
+
+  if (rawVal !== null && typeof rawVal === 'object' && !Array.isArray(rawVal) && ('value' in rawVal || 'confidence' in rawVal)) {
+    val = rawVal.value;
+    if (typeof rawVal.confidence === 'number') {
+      conf = rawVal.confidence;
+    }
+  }
+
+  if (type === 'number') {
+    const parsed = parseNumeric(val);
+    return {
+      value: parsed,
+      confidence: parsed !== null ? conf : 0
+    };
+  } else if (type === 'string') {
+    const parsed = parseString(val);
+    return {
+      value: parsed,
+      confidence: parsed !== null ? conf : 0
+    };
+  }
+
+  return { value: val ?? null, confidence: conf };
+}
+
+function extractEntityField(source, entityKeys, propertyKeys) {
+  if (!source || typeof source !== 'object') return undefined;
+
+  // 1. Direct matching on source
+  for (const pk of propertyKeys) {
+    if (pk in source && source[pk] !== undefined && source[pk] !== null) {
+      const val = source[pk];
+      if (typeof val === 'object' && !Array.isArray(val) && !('value' in val)) {
+        // If it's an entity object (e.g. source.vendor = { name: "...", address: "..." })
+        for (const subKey of ['name', 'value', 'text', 'company', 'address']) {
+          if (val[subKey] !== undefined && val[subKey] !== null) return val[subKey];
+        }
+      } else {
+        return val;
+      }
+    }
+  }
+
+  // 2. Matching within nested entity objects (e.g. source.from.name, source.bill_to.address)
+  for (const ek of entityKeys) {
+    const entity = source[ek];
+    if (entity && typeof entity === 'object') {
+      const target = ('value' in entity && typeof entity.value === 'object') ? entity.value : entity;
+      for (const pk of propertyKeys) {
+        if (pk in target && target[pk] !== undefined && target[pk] !== null) {
+          return target[pk];
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Normalizes ISO 4217 currency codes, symbols, and currency descriptions.
+ * Follows strict ambiguity rules: The '$' symbol can refer to USD, CAD, AUD, etc.
+ * Uses explicit currency codes or reliable context (vendor, location, ISO code) to resolve.
+ * If cannot be determined confidently, returns 'UNKNOWN' instead of guessing.
+ */
+function normalizeCurrencyCode(val, contextText = '') {
+  if (!val) return 'UNKNOWN';
+  if (typeof val === 'object' && val !== null) {
+    val = val.value || val.code || val.currency || '';
+  }
+  const str = String(val).trim();
+  if (!str) return 'UNKNOWN';
+
+  const upper = str.toUpperCase();
+  if (upper === 'UNKNOWN' || upper === 'NONE' || upper === 'N/A' || upper === 'NULL' || upper === 'UNDEFINED') {
+    return 'UNKNOWN';
+  }
+
+  // 1. Explicit Indian Rupee symbols & codes
+  if (upper === 'INR' || str === '₹' || upper === 'RS' || upper === 'RS.' || upper === 'RUPEE' || upper === 'RUPEES' || upper.startsWith('INR')) {
+    return 'INR';
+  }
+
+  // 2. Explicit Non-USD Dollar currencies
+  if (upper === 'CAD' || str === 'CA$' || str === 'C$' || upper.startsWith('CAD') || upper === 'CANADIAN DOLLAR' || upper === 'CANADIAN DOLLARS') {
+    return 'CAD';
+  }
+  if (upper === 'AUD' || str === 'AU$' || str === 'A$' || upper.startsWith('AUD') || upper === 'AUSTRALIAN DOLLAR' || upper === 'AUSTRALIAN DOLLARS') {
+    return 'AUD';
+  }
+  if (upper === 'SGD' || str === 'S$' || upper.startsWith('SGD') || upper === 'SINGAPORE DOLLAR') {
+    return 'SGD';
+  }
+  if (upper === 'NZD' || str === 'NZ$' || upper.startsWith('NZD') || upper === 'NEW ZEALAND DOLLAR') {
+    return 'NZD';
+  }
+  if (upper === 'HKD' || str === 'HK$' || upper.startsWith('HKD') || upper === 'HONG KONG DOLLAR') {
+    return 'HKD';
+  }
+
+  // 3. Explicit US Dollar markers
+  if (upper === 'USD' || upper === 'US$' || upper === 'US DOLLAR' || upper === 'US DOLLARS' || upper.startsWith('USD')) {
+    return 'USD';
+  }
+
+  // 4. Ambiguity rule for bare '$' or 'DOLLAR'
+  // The '$' symbol can refer to multiple currencies. If reliable context (e.g. USA, Canada, Australia) is present, resolve it.
+  // If ambiguous without clarifying context, return UNKNOWN instead of guessing.
+  if (str === '$' || upper === 'DOLLAR' || upper === 'DOLLARS') {
+    const ctx = (contextText || '').toUpperCase();
+    if (ctx.includes('USD') || ctx.includes('UNITED STATES') || ctx.includes('U.S.A') || ctx.includes('USA') || ctx.includes('US DOLLAR') || ctx.includes('SF TECH') || ctx.includes('DELAWARE') || ctx.includes('CALIFORNIA') || ctx.includes('NEW YORK')) {
+      return 'USD';
+    }
+    if (ctx.includes('CAD') || ctx.includes('CANADA') || ctx.includes('CANADIAN') || ctx.includes('ONTARIO') || ctx.includes('TORONTO')) {
+      return 'CAD';
+    }
+    if (ctx.includes('AUD') || ctx.includes('AUSTRALIA') || ctx.includes('AUSTRALIAN') || ctx.includes('SYDNEY') || ctx.includes('MELBOURNE')) {
+      return 'AUD';
+    }
+    if (ctx.includes('SGD') || ctx.includes('SINGAPORE')) {
+      return 'SGD';
+    }
+    // Ambiguous '$' with no reliable context -> return UNKNOWN to request clarification rather than guess
+    return 'UNKNOWN';
+  }
+
+  // 5. Euro
+  if (upper === 'EUR' || str === '€' || upper === 'EURO' || upper === 'EUROS' || upper.startsWith('EUR')) {
+    return 'EUR';
+  }
+
+  // 6. British Pound
+  if (upper === 'GBP' || str === '£' || upper === 'POUND' || upper === 'POUNDS' || upper === 'STERLING' || upper.startsWith('GBP')) {
+    return 'GBP';
+  }
+
+  // 7. Japanese Yen
+  if (upper === 'JPY' || str === '¥' || upper === 'YEN' || upper.startsWith('JPY')) {
+    return 'JPY';
+  }
+
+  // 8. Swiss Franc
+  if (upper === 'CHF' || upper.startsWith('CHF')) {
+    return 'CHF';
+  }
+
+  // 9. Chinese Yuan
+  if (upper === 'CNY' || upper.startsWith('CNY')) {
+    return 'CNY';
+  }
+
+  // 10. UAE Dirham
+  if (upper === 'AED' || upper.startsWith('AED')) {
+    return 'AED';
+  }
+
+  // Standard 3-letter alphabetic ISO 4217 code
+  if (/^[A-Z]{3}$/.test(upper)) {
+    return upper;
+  }
+
+  return 'UNKNOWN';
+}
+
+function formatCurrencyBackend(amount, currencyCode) {
+  const num = Number(amount) || 0;
+  const c = normalizeCurrencyCode(currencyCode);
+  if (c === 'INR') return `₹${num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (c === 'USD') return `$${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (c === 'EUR') return `€${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (c === 'GBP') return `£${num.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (c === 'UNKNOWN') return `${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (Unknown Currency)`;
+  return `${c} ${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function normalizeInvoiceData(rawInvoiceData, rawAnalysis = {}) {
+  // Merge all potential source containers (rawInvoiceData, extractedData, invoiceData, data, root)
+  const source = {};
+  if (rawAnalysis && typeof rawAnalysis === 'object') {
+    Object.assign(source, rawAnalysis);
+    if (rawAnalysis.data && typeof rawAnalysis.data === 'object') Object.assign(source, rawAnalysis.data);
+    if (rawAnalysis.extractedData && typeof rawAnalysis.extractedData === 'object') Object.assign(source, rawAnalysis.extractedData);
+    if (rawAnalysis.extracted_data && typeof rawAnalysis.extracted_data === 'object') Object.assign(source, rawAnalysis.extracted_data);
+    if (rawAnalysis.invoiceData && typeof rawAnalysis.invoiceData === 'object') Object.assign(source, rawAnalysis.invoiceData);
+  }
+  if (rawInvoiceData && typeof rawInvoiceData === 'object') {
+    Object.assign(source, rawInvoiceData);
+    if (rawInvoiceData.extractedData && typeof rawInvoiceData.extractedData === 'object') Object.assign(source, rawInvoiceData.extractedData);
+    if (rawInvoiceData.invoiceData && typeof rawInvoiceData.invoiceData === 'object') Object.assign(source, rawInvoiceData.invoiceData);
+  }
+
+  // Supplier / Vendor Details
+  const vendorRaw = extractEntityField(
+    source,
+    ['from', 'vendor', 'supplier', 'seller', 'bill_from', 'billed_by', 'merchant'],
+    ['vendor', 'vendor_name', 'vendorName', 'supplier', 'supplier_name', 'supplierName', 'seller', 'seller_name', 'name', 'merchant_name', 'company_name']
+  );
+  const vendor = normalizeField(vendorRaw, 'string');
+
+  const vendorAddressRaw = extractEntityField(
+    source,
+    ['from', 'vendor', 'supplier', 'seller', 'bill_from'],
+    ['vendorAddress', 'vendor_address', 'supplierAddress', 'supplier_address', 'address', 'full_address', 'location']
+  );
+  const vendorAddress = normalizeField(vendorAddressRaw, 'string');
+
+  const gstNumberRaw = extractEntityField(
+    source,
+    ['from', 'vendor', 'supplier', 'seller'],
+    ['gstNumber', 'gst_number', 'gstin', 'vendorGstin', 'vendor_gstin', 'tax_id', 'vat_number', 'taxId', 'vat_no']
+  );
+  const gstNumber = normalizeField(gstNumberRaw, 'string');
+
+  // Customer / Buyer Details
+  const customerRaw = extractEntityField(
+    source,
+    ['bill_to', 'billed_to', 'customer', 'buyer', 'client', 'to', 'recipient'],
+    ['customerName', 'customer_name', 'customer', 'client', 'client_name', 'buyer', 'buyer_name', 'name', 'billed_to_name']
+  );
+  const customerName = normalizeField(customerRaw, 'string');
+
+  const customerAddressRaw = extractEntityField(
+    source,
+    ['bill_to', 'billed_to', 'customer', 'buyer', 'client', 'to'],
+    ['customerAddress', 'customer_address', 'buyerAddress', 'buyer_address', 'address', 'full_address', 'location']
+  );
+  const customerAddress = normalizeField(customerAddressRaw, 'string');
+
+  const customerGstinRaw = extractEntityField(
+    source,
+    ['bill_to', 'billed_to', 'customer', 'buyer', 'client', 'to'],
+    ['customerGstin', 'customer_gstin', 'buyerGstin', 'buyer_gstin', 'gstin', 'gst_number', 'tax_id']
+  );
+  const customerGstin = normalizeField(customerGstinRaw, 'string');
+
+  // Invoice Identifiers & Dates
+  const invoiceNumber = normalizeField(getRawField(source, ['invoiceNumber', 'invoice_number', 'invoice_no', 'bill_no', 'tax_invoice_no', 'inv_no', 'number']), 'string');
+  const date = normalizeField(getRawField(source, ['date', 'invoice_date', 'issue_date', 'bill_date', 'billing_date', 'date_of_issue']), 'string');
+  const dueDate = normalizeField(getRawField(source, ['dueDate', 'due_date', 'payment_due', 'pay_by', 'payment_due_date']), 'string');
+
+  // Amounts & Subtotals
+  const subtotal = normalizeField(getRawField(source, ['subtotal', 'sub_total', 'taxable_subtotal', 'taxable_amount', 'taxable_value', 'net_amount']), 'number');
+  const grossSubtotal = normalizeField(getRawField(source, ['grossSubtotal', 'gross_subtotal', 'gross_amount']), 'number');
+  const netTaxableSubtotal = normalizeField(getRawField(source, ['netTaxableSubtotal', 'net_taxable_subtotal', 'taxable_value']), 'number');
+
+  // Taxes & GST Breakdown
+  const cgst = normalizeField(getRawField(source, ['cgst', 'cgst_amount', 'central_tax', 'central_gst']), 'number');
+  const sgst = normalizeField(getRawField(source, ['sgst', 'sgst_amount', 'state_tax', 'state_gst']), 'number');
+  const igst = normalizeField(getRawField(source, ['igst', 'igst_amount', 'integrated_tax', 'integrated_gst']), 'number');
+  const vat = normalizeField(getRawField(source, ['vat', 'vat_amount']), 'number');
+  const salesTax = normalizeField(getRawField(source, ['salesTax', 'sales_tax']), 'number');
+  const otherTaxes = normalizeField(getRawField(source, ['otherTaxes', 'other_taxes']), 'number');
+
+  // Total Tax / GST
+  let taxField = normalizeField(getRawField(source, ['tax', 'tax_amount', 'total_tax', 'total_gst', 'totalGst', 'gst_amount', 'gstAmount', 'taxes']), 'number');
+  if (taxField.value === null) {
+    const gstComponentsSum = (cgst.value || 0) + (sgst.value || 0) + (igst.value || 0);
+    if (gstComponentsSum > 0) {
+      taxField = { value: gstComponentsSum, confidence: 0.95 };
+    }
+  }
+  const tax = taxField;
+  const totalGst = normalizeField(getRawField(source, ['totalGst', 'total_gst', 'totalGstAmount']) || taxField, 'number');
+
+  const roundOff = normalizeField(getRawField(source, ['roundOff', 'round_off', 'roundoff', 'rounding_adjustment']), 'number');
+  const discount = normalizeField(getRawField(source, ['discount', 'discount_amount', 'discountAmount']), 'number');
+  const shipping = normalizeField(getRawField(source, ['shipping', 'shipping_amount', 'shipping_freight', 'freight', 'freight_charges']), 'number');
+  const freight = normalizeField(getRawField(source, ['freight', 'freight_charges']), 'number');
+  const otherCharges = normalizeField(getRawField(source, ['otherCharges', 'other_charges']), 'number');
+
+  const totalAmount = normalizeField(getRawField(source, ['totalAmount', 'total_amount', 'grand_total', 'grandTotal', 'total', 'invoice_total', 'amount_due', 'net_payable']), 'number');
+  const amountPaid = normalizeField(getRawField(source, ['amountPaid', 'amount_paid', 'paid_amount']), 'number');
+
+  // Outstanding amount / Balance Due
+  let balanceField = normalizeField(getRawField(source, ['balanceDue', 'balance_due', 'outstanding_amount', 'outstandingAmount', 'outstanding_balance', 'balance']), 'number');
+  if (balanceField.value === null && totalAmount.value !== null) {
+    const paid = amountPaid.value !== null ? amountPaid.value : 0;
+    balanceField = { value: Math.max(0, totalAmount.value - paid), confidence: 0.95 };
+  }
+  const balanceDue = balanceField;
+
+  const paymentStatus = normalizeField(getRawField(source, ['paymentStatus', 'payment_status', 'status']), 'string');
+
+  // Currency resolution:
+  // Context to resolve currency ambiguity (vendor, customer, addresses)
+  const contextText = `${JSON.stringify(source.vendor || '')} ${JSON.stringify(source.customerName || '')} ${JSON.stringify(source.vendorAddress || '')} ${JSON.stringify(source.customerAddress || '')}`;
+
+  // 1. Explicit currency code or symbol
+  const rawCurrencyField = getRawField(source, ['currency', 'currency_code', 'currencyCode', 'symbol']);
+  let resolvedCurrency = normalizeCurrencyCode(rawCurrencyField, contextText);
+
+  // 2. If missing or UNKNOWN from explicit field, inspect printed currency symbols on amount strings
+  if (resolvedCurrency === 'UNKNOWN') {
+    const rawTotal = String(getRawField(source, ['totalAmount', 'total_amount', 'grand_total', 'grandTotal', 'total', 'amount_due']) || '');
+    const rawSubtotal = String(getRawField(source, ['subtotal', 'grossSubtotal', 'netTaxableSubtotal']) || '');
+    const combined = `${rawTotal} ${rawSubtotal}`;
+
+    if (combined.includes('₹') || /\bRs\.?\s*\d/i.test(combined) || /\bINR\b/i.test(combined)) {
+      resolvedCurrency = 'INR';
+    } else if (/\bUSD\b|\bUS\s*\$/i.test(combined)) {
+      resolvedCurrency = 'USD';
+    } else if (combined.includes('$')) {
+      resolvedCurrency = normalizeCurrencyCode('$', contextText);
+    } else if (combined.includes('€') || /\bEUR\b/i.test(combined)) {
+      resolvedCurrency = 'EUR';
+    } else if (combined.includes('£') || /\bGBP\b/i.test(combined)) {
+      resolvedCurrency = 'GBP';
+    } else if (combined.includes('¥') || /\bJPY\b/i.test(combined)) {
+      resolvedCurrency = 'JPY';
+    }
+  }
+
+  // Safe confidence: 0.95 if reliably identified, 0 if unknown/missing (never silently assume USD or INR)
+  const isKnownCurrency = resolvedCurrency !== 'UNKNOWN';
+  const currency = {
+    value: resolvedCurrency,
+    confidence: isKnownCurrency ? 0.95 : 0
+  };
+
+  // Tax Rates
+  let taxRatesVal = parseString(getRawField(source, ['taxRates', 'tax_rates', 'tax_rate', 'gst_rate']));
+  if (!taxRatesVal) {
+    const cgstRate = parseString(getRawField(source, ['cgst_rate', 'cgstRate']));
+    const sgstRate = parseString(getRawField(source, ['sgst_rate', 'sgstRate']));
+    const igstRate = parseString(getRawField(source, ['igst_rate', 'igstRate']));
+    if (cgstRate && sgstRate) {
+      taxRatesVal = `CGST ${cgstRate} + SGST ${sgstRate}`;
+    } else if (igstRate) {
+      taxRatesVal = `IGST ${igstRate}`;
+    } else {
+      const base = netTaxableSubtotal.value || subtotal.value;
+      if (base && base > 0) {
+        if (cgst.value && sgst.value && cgst.value > 0 && sgst.value > 0) {
+          const cRate = Math.round((cgst.value / base) * 100);
+          const sRate = Math.round((sgst.value / base) * 100);
+          taxRatesVal = `CGST ${cRate}% + SGST ${sRate}% (Total ${cRate + sRate}%)`;
+        } else if (igst.value && igst.value > 0) {
+          const iRate = Math.round((igst.value / base) * 100);
+          taxRatesVal = `IGST ${iRate}%`;
+        } else if (tax.value && tax.value > 0) {
+          const tRate = Math.round((tax.value / base) * 100);
+          taxRatesVal = `Tax ${tRate}%`;
+        }
+      }
+    }
+  }
+  const taxRates = { value: taxRatesVal, confidence: taxRatesVal ? 0.9 : 0 };
+
+  const paymentTerms = normalizeField(getRawField(source, ['paymentTerms', 'payment_terms', 'terms']), 'string');
+  const email = normalizeField(getRawField(source, ['email', 'vendor_email', 'contact_email']), 'string');
+  const phone = normalizeField(getRawField(source, ['phone', 'vendor_phone', 'contact_phone']), 'string');
+  const poNumber = normalizeField(getRawField(source, ['poNumber', 'po_number', 'purchase_order', 'po_no']), 'string');
+  const hsnSac = normalizeField(getRawField(source, ['hsnSac', 'hsn_sac', 'hsn', 'sac']), 'string');
+
+  // Line items
+  const rawItems = getRawField(source, ['lineItems', 'line_items', 'items', 'products', 'services']) || [];
+  let itemsList = Array.isArray(rawItems) ? rawItems : (rawItems.value && Array.isArray(rawItems.value) ? rawItems.value : []);
+  const lineItems = {
+    value: itemsList.map(item => {
+      const desc = parseString(item.description || item.item || item.name || item.title) || "Item";
+      const qty = parseNumeric(item.quantity !== undefined ? item.quantity : item.qty);
+      const uPrice = parseNumeric(item.unitPrice || item.unit_price || item.rate || item.price);
+      let taxAmount = parseNumeric(item.taxableAmount || item.taxable_amount || item.taxable_value || item.taxableValue);
+      if (taxAmount === null && qty !== null && uPrice !== null) {
+        taxAmount = qty * uPrice;
+      }
+      let amt = parseNumeric(item.amount || item.total || item.lineTotal || item.line_total || item.total_amount);
+      if (amt === null && taxAmount !== null) {
+        amt = taxAmount;
+      }
+      return {
+        description: desc,
+        quantity: qty,
+        unitPrice: uPrice,
+        taxableAmount: taxAmount,
+        amount: amt
+      };
+    }),
+    confidence: itemsList.length > 0 ? 0.95 : 0
+  };
+
+  return {
+    vendor,
+    vendorAddress,
+    customerName,
+    customerAddress,
+    customerGstin,
+    invoiceNumber,
+    date,
+    dueDate,
+    subtotal,
+    grossSubtotal,
+    netTaxableSubtotal,
+    tax,
+    totalGst,
+    cgst,
+    sgst,
+    igst,
+    vat,
+    salesTax,
+    otherTaxes,
+    taxRates,
+    discount,
+    shipping,
+    freight,
+    otherCharges,
+    roundOff,
+    totalAmount,
+    amountPaid,
+    balanceDue,
+    paymentStatus,
+    currency,
+    gstNumber,
+    paymentTerms,
+    email,
+    phone,
+    poNumber,
+    hsnSac,
+    lineItems
+  };
+}
+
+/**
+ * Executes a Gemini generateContent call with bounded exponential-backoff retries
+ * and an observable fallback from primary model (gemini-3.8-flash) to verified fallback (gemini-3.5-flash).
+ */
+async function generateWithRetryAndFallback(genAIInstance, {
+  primaryModel = "gemini-3.8-flash",
+  fallbackModel = "gemini-3.5-flash",
+  contents,
+  generationConfig = {},
+  stageName = "Processing"
+}) {
+  const isTransientError = (err) => {
+    if (!err) return false;
+    const status = err.status || (err.response && err.response.status);
+    const msg = (err.message || "").toLowerCase();
+    if (status === 503 || status === 429 || status === 500 || status === 502 || status === 504) return true;
+    if (msg.includes("503") || msg.includes("429") || msg.includes("high demand") || msg.includes("resource exhausted") || msg.includes("temporarily unavailable") || msg.includes("overloaded") || msg.includes("quota exceeded")) {
+      return true;
+    }
+    return false;
+  };
+
+  const isPermanentError = (err) => {
+    if (!err) return false;
+    const status = err.status || (err.response && err.response.status);
+    const msg = (err.message || "").toLowerCase();
+    if (status === 400 || status === 401 || status === 403 || status === 404) return true;
+    if (msg.includes("api key") || msg.includes("permission_denied") || msg.includes("invalid argument")) return true;
+    return false;
+  };
+
+  const tryModel = async (modelName, config, maxAttempts = 3) => {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log(`[Gemini ${stageName}] Model '${modelName}' - Attempt ${attempt} of ${maxAttempts}...`);
+        const model = genAIInstance.getGenerativeModel({
+          model: modelName,
+          generationConfig: config
+        });
+        const result = await model.generateContent(contents);
+        const text = result.response.text();
+        console.log(`[Gemini ${stageName}] Model '${modelName}' succeeded on attempt ${attempt}. Response length: ${text.length}`);
+        return { text, modelName, attempt, success: true };
+      } catch (err) {
+        lastErr = err;
+        const status = err.status || "UnknownStatus";
+        const msg = (err.message || "").toLowerCase();
+        console.warn(`[Gemini ${stageName}] Model '${modelName}' attempt ${attempt} failed (Status: ${status}): ${err.message}`);
+
+        if (isPermanentError(err)) {
+          console.error(`[Gemini ${stageName}] Permanent non-retryable error encountered: ${err.message}`);
+          throw err;
+        }
+
+        // Check if error is severe quota exhaustion with long delay (e.g. >30s or daily quota)
+        if (msg.includes("quota exceeded") || msg.includes("please retry in") || msg.includes("daily")) {
+          console.warn(`[Gemini ${stageName}] Model '${modelName}' has daily/extended quota limit exhausted. Fast-failing to next model.`);
+          break; // Don't sleep for hours, proceed directly to fallback
+        }
+
+        if (attempt < maxAttempts && isTransientError(err)) {
+          const delay = Math.min(4000, 1000 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500));
+          console.log(`[Gemini ${stageName}] Retrying '${modelName}' in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+    }
+    return { success: false, error: lastErr };
+  };
+
+  // 1. Try primary model (gemini-3.8-flash)
+  let primaryRes = await tryModel(primaryModel, generationConfig, 3);
+  if (primaryRes.success) {
+    return { text: primaryRes.text, modelUsed: primaryModel, fallbackUsed: false, attempts: primaryRes.attempt };
+  }
+
+  if (primaryRes.error && isPermanentError(primaryRes.error)) {
+    throw primaryRes.error;
+  }
+
+  // 2. Primary model failed (503/429/transient). Fall back to verified fallbackModel (gemini-3.5-flash)
+  console.warn(`[Gemini ${stageName}] Primary model '${primaryModel}' unavailable (${primaryRes.error?.message}). Initiating observable fallback to verified '${fallbackModel}'...`);
+
+  let fallbackRes = await tryModel(fallbackModel, generationConfig, 3);
+  if (fallbackRes.success) {
+    return {
+      text: fallbackRes.text,
+      modelUsed: `${fallbackModel} (fallback)`,
+      fallbackUsed: true,
+      attempts: fallbackRes.attempt,
+      primaryError: primaryRes.error?.message
+    };
+  }
+
+  // 3. If fallback failed and strict responseSchema was used, retry without strict grammar constraints to avoid 503 grammar timeouts
+  if (generationConfig.responseSchema) {
+    console.warn(`[Gemini ${stageName}] Retrying '${fallbackModel}' with responseMimeType: 'application/json' to bypass schema grammar constraints...`);
+    const relaxedConfig = { responseMimeType: "application/json" };
+    let relaxedRes = await tryModel(fallbackModel, relaxedConfig, 2);
+    if (relaxedRes.success) {
+      return {
+        text: relaxedRes.text,
+        modelUsed: `${fallbackModel} (fallback: prompt JSON)`,
+        fallbackUsed: true,
+        attempts: relaxedRes.attempt
+      };
+    }
+  }
+
+  const finalErr = fallbackRes.error || primaryRes.error;
+  throw new Error(`Document AI Service temporarily unavailable: ${primaryModel} and ${fallbackModel} experienced high demand / quota limits. (${finalErr?.message})`);
+}
+
 // Standard reusable schemas for field + confidence score
 // We omit "value" from required parameters so Gemini can return null/omit it if missing
 const valueString = {
@@ -147,6 +722,7 @@ const lineItemSchema = {
     description: { type: SchemaType.STRING, description: "Item description." },
     quantity: { type: SchemaType.NUMBER, description: "Quantity of items. Set to null if missing.", nullable: true },
     unitPrice: { type: SchemaType.NUMBER, description: "Unit price of item. Set to null if missing.", nullable: true },
+    taxableAmount: { type: SchemaType.NUMBER, description: "Taxable amount of item. Set to null if missing.", nullable: true },
     amount: { type: SchemaType.NUMBER, description: "Line item total amount. Set to null if missing.", nullable: true }
   },
   required: ["description", "quantity", "unitPrice", "amount"]
@@ -190,12 +766,16 @@ const invoiceSchema = {
       type: SchemaType.OBJECT,
       properties: {
         vendor: valueString,
+        vendorAddress: valueString,
         customerName: valueString,
+        customerAddress: valueString,
+        customerGstin: valueString,
         invoiceNumber: valueString,
         date: valueString,
         dueDate: valueString,
         subtotal: valueNumber,
         tax: valueNumber,
+        totalGst: valueNumber,
         shipping: valueNumber,
         discount: valueNumber,
         totalAmount: valueNumber,
@@ -215,6 +795,10 @@ const invoiceSchema = {
         roundOff: valueNumber,
         freight: valueNumber,
         otherCharges: valueNumber,
+        taxRates: valueString,
+        amountPaid: valueNumber,
+        balanceDue: valueNumber,
+        paymentStatus: valueString,
         poNumber: valueString,
         hsnSac: valueString,
         lineItems: valueArrayLineItems
@@ -246,6 +830,10 @@ const invoiceSchema = {
         "roundOff",
         "freight",
         "otherCharges",
+        "taxRates",
+        "amountPaid",
+        "balanceDue",
+        "paymentStatus",
         "poNumber",
         "hsnSac",
         "lineItems"
@@ -629,13 +1217,13 @@ async function runDailyChecks(userId = null) {
 
     const vendor = doc.invoiceData?.vendor?.value || "Unknown Vendor";
     const invoiceNum = doc.invoiceData?.invoiceNumber?.value || "N/A";
-    const currency = doc.invoiceData?.currency?.value || "$";
+    const currency = doc.currency || doc.invoiceData?.currency?.value;
     const amount = doc.invoiceData?.totalAmount?.value || 0;
 
     const body = `Dear Partner,\n\nThis is an automated notification regarding a pending invoice in FlowPilot.\n\n` +
       `- Vendor: ${vendor}\n` +
       `- Invoice Number: ${invoiceNum}\n` +
-      `- Total Amount: ${currency} ${amount.toLocaleString()}\n` +
+      `- Total Amount: ${formatCurrencyBackend(amount, currency)}\n` +
       `- Due Date: ${dueDateStr}\n` +
       `- Status: ${doc.status}\n\n` +
       `Please review and process the payment as soon as possible.\n\n` +
@@ -755,17 +1343,34 @@ app.post("/api/upload", authenticateToken, uploadLimiter, (req, res, next) => {
     const isText = mimetype === "text/plain";
     const filePart = isText ? buffer.toString("utf8") : bufferToGenerativePart(buffer, mimetype);
 
-    // Stage 1: Document Classification
-    console.log("Stage 1: Classifying document type...");
-    const classifierModel = genAI.getGenerativeModel({
-      model: "gemini-3.8-flash",
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: classificationSchema
-      }
-    });
+    const filenameLower = (sanitizedFilename || "").toLowerCase();
 
-    const classificationPrompt = `Analyze the layout, titles, structure, and text content of this document. Detect the document type and classify it into exactly one of the following:
+    // Fast-path heuristic detection to avoid redundant Gemini classification API calls
+    let pdfTextSample = "";
+    if (mimetype === "application/pdf" && buffer.length > 0) {
+      pdfTextSample = buffer.toString("latin1", 0, Math.min(buffer.length, 128 * 1024));
+    }
+
+    const isInvoiceByName = /(^|[-_.\s])(invoice|bill|inv|receipt|tax[-_]?inv)([-_.\s\d]|$)/i.test(filenameLower) ||
+      filenameLower.includes("invoice") ||
+      filenameLower.includes("bill") ||
+      filenameLower.includes("receipt");
+
+    const isInvoiceByContent = (isText && /tax invoice|bill to|gstin|subtotal|amount due|invoice date/i.test(filePart)) ||
+      (mimetype === "application/pdf" && /tax\s*invoice|bill\s*to|gstin|amount\s*due|invoice\s*no|total\s*payable/i.test(pdfTextSample));
+
+    let detectedType = "other";
+    let detectedConfidence = 0.85;
+    let classificationModel = "gemini-3.8-flash (direct-pass)";
+
+    if (isInvoiceByName || isInvoiceByContent) {
+      console.log(`[Upload Optimization] Document identified as invoice via filename/content heuristics (${sanitizedFilename}). Bypassing redundant AI classification pass to accelerate upload.`);
+      detectedType = filenameLower.includes("receipt") ? "receipt" : "invoice";
+      detectedConfidence = 0.98;
+    } else {
+      // Ambiguous or non-invoice document. Run Stage 1 classification with Gemini.
+      console.log("Stage 1: Classifying document type with Gemini...");
+      const classificationPrompt = `Analyze the layout, titles, structure, and text content of this document. Detect the document type and classify it into exactly one of the following:
 - invoice
 - receipt
 - resume
@@ -775,22 +1380,41 @@ app.post("/api/upload", authenticateToken, uploadLimiter, (req, res, next) => {
 - policy
 - sop`;
 
-    let detectedType = "other";
-    let detectedConfidence = 0.85;
+      try {
+        const classRes = await generateWithRetryAndFallback(genAI, {
+          primaryModel: "gemini-3.8-flash",
+          fallbackModel: "gemini-3.5-flash",
+          contents: [classificationPrompt, filePart],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: classificationSchema
+          },
+          stageName: "Classification"
+        });
+        classificationModel = classRes.modelUsed;
+        const classResponseText = classRes.text.trim();
+        console.log("Raw Classification Response:", classResponseText);
+        const parsedClass = JSON.parse(classResponseText);
+        if (parsedClass.documentType) {
+          detectedType = parsedClass.documentType.toLowerCase().replace(" ", "_");
+        }
+        if (parsedClass.confidence !== undefined) {
+          detectedConfidence = parsedClass.confidence;
+        }
+      } catch (err) {
+        console.error("Classification stage failed, defaulting to 'other':", err.message);
+      }
+    }
 
-    try {
-      const classResult = await classifierModel.generateContent([classificationPrompt, filePart]);
-      const classResponseText = classResult.response.text().trim();
-      console.log("Raw Classification Response:", classResponseText);
-      const parsedClass = JSON.parse(classResponseText);
-      if (parsedClass.documentType) {
-        detectedType = parsedClass.documentType.toLowerCase().replace(" ", "_");
-      }
-      if (parsedClass.confidence !== undefined) {
-        detectedConfidence = parsedClass.confidence;
-      }
-    } catch (err) {
-      console.error("Classification stage failed, defaulting to 'other':", err.message);
+    // Heuristic verification: If classification failed or returned 'other', check filename and text patterns
+    const isLikelyInvoice = detectedType === "invoice" ||
+      filenameLower.includes("invoice") ||
+      filenameLower.includes("bill") ||
+      (isText && /tax invoice|bill to|gstin|subtotal|amount due/i.test(filePart));
+
+    if (detectedType === "other" && isLikelyInvoice) {
+      console.log("[Classification Heuristic] Document appears to be an invoice based on filename/content markers. Elevating detectedType to 'invoice'.");
+      detectedType = "invoice";
     }
 
     // Map any close names to ensure strict typing
@@ -818,10 +1442,13 @@ Here are specific field guidelines:
 4. Date: Look for labels like "Invoice Date", "Date", "Date of Invoice", "Billing Date", "Bill Date".
 5. Due Date: Look for labels like "Due Date", "Payment Due", "Pay By", "Due On", "Payment Date".
 6. GST Number: Extract the vendor's GSTIN / Tax registration number / VAT / Tax ID.
-7. Currency: Detect the currency (e.g. INR, USD, EUR, GBP). Preserve the currency code or symbol (e.g. ₹, $, €, £). If the document uses Indian Rupees, set currency to "INR".
+7. Currency: Detect the original currency (e.g. INR, USD, EUR, GBP). Prefer explicit currency declarations or symbols printed alongside financial amounts (e.g. ₹, Rs, $, €, £). If Indian Rupees, set currency to "INR". If US Dollars, set currency to "USD". If the currency is ambiguous or cannot be reliably established from the document, return "UNKNOWN". Do NOT guess currency solely from vendor location or language.
 8. Total Amount: This is the final grand total / total payable / amount due / net payable / invoice total. Do NOT return 0 or default to 0 if a valid total exists in the document. Look for labels like "Grand Total", "Total", "Total Amount", "Total Payable", "Amount Due", "Net Amount", "Invoice Total", "Balance Due", "Amount Payable", "Total Invoice Value".
-9. For all numeric fields (totalAmount, subtotal, grossSubtotal, netTaxableSubtotal, discount, shipping, freight, otherCharges, cgst, sgst, igst, vat, salesTax, otherTaxes, tax, roundOff): extract them as numbers.
-10. Line Items: Extract description, quantity, unitPrice, amount.
+9. Subtotals: Extract subtotal, grossSubtotal, and netTaxableSubtotal as numbers.
+10. Taxes & GST Breakdown: Extract cgst, sgst, igst, vat, salesTax, otherTaxes, and tax as numbers. Extract taxRates as a string (e.g. "9% CGST + 9% SGST" or "18%").
+11. Charges & Round Off: Extract discount, shipping, freight, otherCharges, roundOff as numbers.
+12. Payment Details: Extract amountPaid (number), balanceDue (number), and paymentStatus (e.g. "Unpaid", "Paid", "Partially Paid").
+13. Line Items: Extract description, quantity, unitPrice, amount.
 
 IMPORTANT: You MUST return every field specified in the schema. For any field that is NOT present or cannot be found in the document, you MUST set its "value" to null. Do NOT return "N/A" or placeholders.`;
         break;
@@ -906,32 +1533,67 @@ Extract these SOP fields:
     }
 
     console.log(`Stage 2: Extracting specific details using schema for "${detectedType}"...`);
-    const extractorModel = genAI.getGenerativeModel({
-      model: "gemini-3.8-flash",
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: selectedSchema
-      }
-    });
-
-    let responseText = "";
-    let rawResult;
+    let extractionRes;
     try {
-      rawResult = await extractorModel.generateContent([extractionPrompt, filePart]);
-      responseText = rawResult.response.text();
-      console.log("Received response from Gemini API. Length:", responseText.length);
-
-      // Log raw response for debugging (Requirement 6)
-      console.log("--- RAW GEMINI RESPONSE START ---");
-      console.log(responseText);
-      console.log("--- RAW GEMINI RESPONSE END ---");
-    } catch (apiError) {
-      console.error("Error communicating with Gemini API:", apiError);
-      return res.status(502).json({
-        error: "Gemini API Communication Failure",
-        details: apiError.message
+      extractionRes = await generateWithRetryAndFallback(genAI, {
+        primaryModel: "gemini-3.8-flash",
+        fallbackModel: "gemini-3.5-flash",
+        contents: [extractionPrompt, filePart],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: selectedSchema
+        },
+        stageName: "Extraction"
       });
+    } catch (apiError) {
+      console.error("Error communicating with Gemini API during extraction:", apiError.message);
+      // Requirement 8: Handle Gemini 429 quota errors and other API failures gracefully.
+      // Preserve the uploaded file and show an explicit processing status when AI extraction cannot run.
+      const isQuota = (apiError.status === 429) || (apiError.message && (apiError.message.includes("429") || apiError.message.includes("quota") || apiError.message.includes("Resource has been exhausted")));
+      const statusReason = isQuota ? "API Quota Limit Reached" : "AI Provider Temporarily Unavailable";
+      const fallbackDoc = {
+        id: Date.now().toString(),
+        fileName: sanitizedFilename,
+        fileSize: size,
+        mimeType: mimetype,
+        uploadedAt: new Date().toISOString(),
+        status: "Pending",
+        isDuplicate: false,
+        amountMismatch: false,
+        missingGst: false,
+        documentType: detectedType || "invoice",
+        confidence: 0,
+        summary: `Document uploaded and preserved successfully. AI structured extraction is temporarily paused (${statusReason}: ${apiError.message}). Your file is securely preserved. Click 'Extract Invoice Parameters' or 'Reprocess' in the dashboard once API quota is available.`,
+        ocrVerification: { readabilityScore: 0.85, notes: "Stored successfully, pending extraction." },
+        recommendedRouting: { department: "Review Queue", reason: "AI extraction pending quota/provider availability" },
+        invoiceData: null,
+        contractData: null,
+        resumeData: null,
+        sopData: null,
+        policyData: null,
+        purchaseOrderData: null,
+        bankStatementData: null,
+        originalFile: buffer.toString("base64"),
+        extractedJson: null,
+        suggestedActions: [
+          { label: "Reprocess Document", action: "reprocess", description: "Re-run AI extraction once API quota is available" }
+        ],
+        keyDates: [],
+        userId: req.user.id,
+        modelUsed: "none (pending)"
+      };
+      await db.addDocument(fallbackDoc);
+      return res.status(200).json(fallbackDoc);
     }
+
+    const responseText = extractionRes.text;
+    const modelUsed = extractionRes.modelUsed;
+    console.log("Received response from Gemini API. Model used:", modelUsed, "Length:", responseText.length);
+
+    // Log raw response for debugging (Requirement 6)
+    console.log("--- RAW GEMINI RESPONSE START ---");
+    console.log(responseText);
+    console.log("--- RAW GEMINI RESPONSE END ---");
 
     // Clean response text to ensure ONLY valid JSON (Requirement 1, 2, 3)
     let cleanText = responseText.trim();
@@ -961,10 +1623,39 @@ Extract these SOP fields:
       }
 
       if (!analysisResult) {
-        return res.status(422).json({
-          error: "AI Response Parsing Failure",
-          details: "The document analysis failed because the AI response was not formatted as valid JSON. Please try again."
-        });
+        const fallbackDoc = {
+          id: Date.now().toString(),
+          fileName: sanitizedFilename,
+          fileSize: size,
+          mimeType: mimetype,
+          uploadedAt: new Date().toISOString(),
+          status: "Pending",
+          isDuplicate: false,
+          amountMismatch: false,
+          missingGst: false,
+          documentType: detectedType || "invoice",
+          confidence: 0,
+          summary: `Document uploaded and preserved successfully. AI returned non-JSON response. Your file is securely preserved. Click 'Extract Invoice Parameters' or 'Reprocess' in the dashboard to re-extract.`,
+          ocrVerification: { readabilityScore: 0.75, notes: "Parsing recovery pending retry." },
+          recommendedRouting: { department: "Review Queue", reason: "AI extraction response retry required" },
+          invoiceData: null,
+          contractData: null,
+          resumeData: null,
+          sopData: null,
+          policyData: null,
+          purchaseOrderData: null,
+          bankStatementData: null,
+          originalFile: buffer.toString("base64"),
+          extractedJson: null,
+          suggestedActions: [
+            { label: "Reprocess Document", action: "reprocess", description: "Re-run AI extraction" }
+          ],
+          keyDates: [],
+          userId: req.user.id,
+          modelUsed: modelUsed || "gemini-3.8-flash"
+        };
+        await db.addDocument(fallbackDoc);
+        return res.status(200).json(fallbackDoc);
       }
     }
 
@@ -1001,8 +1692,8 @@ Extract these SOP fields:
 
     analysisResult = sanitizeNullFields(analysisResult);
 
-    // Initialize document properties
-    let status = "Approved";
+    // Initialize document properties (Pending by default, never automatically approved)
+    let status = "Pending";
     let isDuplicate = false;
     let amountMismatch = false;
     let missingGst = false;
@@ -1021,9 +1712,28 @@ Extract these SOP fields:
         subtotal: { value: (rec.totalAmount?.value || 0) - (rec.taxAmount?.value || 0), confidence: 0.9 },
         tax: rec.taxAmount || { value: 0, confidence: 0 },
         totalAmount: rec.totalAmount || { value: 0, confidence: 0 },
-        currency: { value: "USD", confidence: 0.8 },
+        currency: {
+          value: rec.currency ? normalizeCurrencyCode(rec.currency) : (
+            rec.totalAmount && String(rec.totalAmount).includes('₹') ? 'INR' :
+            rec.totalAmount && String(rec.totalAmount).includes('$') ? 'USD' :
+            rec.totalAmount && String(rec.totalAmount).includes('€') ? 'EUR' :
+            rec.totalAmount && String(rec.totalAmount).includes('£') ? 'GBP' : 'UNKNOWN'
+          ),
+          confidence: (rec.currency || (rec.totalAmount && (String(rec.totalAmount).includes('₹') || String(rec.totalAmount).includes('$')))) ? 0.8 : 0
+        },
         gstNumber: { value: null, confidence: 0 }
       };
+    }
+
+    // Normalize invoiceData to guarantee consistent structured extraction
+    if (analysisResult.documentType === "invoice" || analysisResult.documentType === "receipt" || analysisResult.invoiceData || isLikelyInvoice) {
+      if (!analysisResult.invoiceData && isLikelyInvoice) {
+        analysisResult.invoiceData = {};
+      }
+      analysisResult.invoiceData = normalizeInvoiceData(analysisResult.invoiceData, analysisResult);
+      if (isLikelyInvoice && analysisResult.documentType === "other") {
+        analysisResult.documentType = "invoice";
+      }
     }
 
     // Specific post-processing rules for Invoice & Receipt (Generic Financial Validation Engine)
@@ -1034,8 +1744,16 @@ Extract these SOP fields:
       const date = invData.date?.value || "";
       const dueDateStr = invData.dueDate?.value || "";
 
-      // Safe value retrieval helper
-      const getVal = (field) => (field && typeof field.value === 'number') ? field.value : 0;
+      // Safe value retrieval helper supporting numbers, objects, and strings
+      const getVal = (field) => {
+        if (field === null || field === undefined) return 0;
+        if (typeof field === 'number') return isNaN(field) ? 0 : field;
+        if (typeof field === 'object' && 'value' in field) {
+          return (typeof field.value === 'number' && !isNaN(field.value)) ? field.value : (parseNumeric(field.value) || 0);
+        }
+        if (typeof field === 'string') return parseNumeric(field) || 0;
+        return 0;
+      };
 
       const totalAmount = getVal(invData.totalAmount);
       const subtotal = getVal(invData.subtotal);
@@ -1272,7 +1990,8 @@ Difference: ${(totalAmount - expected).toFixed(2)}`;
       extractedJson: JSON.stringify(analysisResult),
       suggestedActions,
       keyDates,
-      userId: req.user.id
+      userId: req.user.id,
+      modelUsed: modelUsed || "gemini-3.8-flash"
     };
 
     // Store persistently
@@ -1636,7 +2355,7 @@ app.post("/api/documents/:id/approve", authenticateToken, async (req, res) => {
       documentName: doc.fileName,
       recipient: "System Audit",
       subject: `[Status Change] Invoice Approved: ${doc.invoiceData?.invoiceNumber?.value || doc.id}`,
-      body: `Invoice from ${doc.invoiceData?.vendor?.value || "Unknown Vendor"} for ${doc.invoiceData?.currency?.value || "$"}${doc.invoiceData?.totalAmount?.value || 0} was approved by ${req.user.fullName} (${req.user.email}).`,
+      body: `Invoice from ${doc.invoiceData?.vendor?.value || "Unknown Vendor"} for ${formatCurrencyBackend(doc.invoiceData?.totalAmount?.value, doc.currency || doc.invoiceData?.currency?.value)} was approved by ${req.user.fullName} (${req.user.email}).`,
       sentAt: new Date().toISOString(),
       reminderType: "status_change",
       scheduledDate: new Date().toISOString().split("T")[0],
@@ -1666,7 +2385,7 @@ app.post("/api/documents/:id/reject", authenticateToken, async (req, res) => {
       documentName: doc.fileName,
       recipient: "System Audit",
       subject: `[Status Change] Invoice Rejected: ${doc.invoiceData?.invoiceNumber?.value || doc.id}`,
-      body: `Invoice from ${doc.invoiceData?.vendor?.value || "Unknown Vendor"} for ${doc.invoiceData?.currency?.value || "$"}${doc.invoiceData?.totalAmount?.value || 0} was rejected by ${req.user.fullName} (${req.user.email}).`,
+      body: `Invoice from ${doc.invoiceData?.vendor?.value || "Unknown Vendor"} for ${formatCurrencyBackend(doc.invoiceData?.totalAmount?.value, doc.currency || doc.invoiceData?.currency?.value)} was rejected by ${req.user.fullName} (${req.user.email}).`,
       sentAt: new Date().toISOString(),
       reminderType: "status_change",
       scheduledDate: new Date().toISOString().split("T")[0],
@@ -1696,7 +2415,7 @@ app.post("/api/documents/:id/pay", authenticateToken, async (req, res) => {
       documentName: doc.fileName,
       recipient: "System Audit",
       subject: `[Status Change] Invoice Paid: ${doc.invoiceData?.invoiceNumber?.value || doc.id}`,
-      body: `Invoice from ${doc.invoiceData?.vendor?.value || "Unknown Vendor"} for ${doc.invoiceData?.currency?.value || "$"}${doc.invoiceData?.totalAmount?.value || 0} was marked as Paid by ${req.user.fullName} (${req.user.email}).`,
+      body: `Invoice from ${doc.invoiceData?.vendor?.value || "Unknown Vendor"} for ${formatCurrencyBackend(doc.invoiceData?.totalAmount?.value, doc.currency || doc.invoiceData?.currency?.value)} was marked as Paid by ${req.user.fullName} (${req.user.email}).`,
       sentAt: new Date().toISOString(),
       reminderType: "status_change",
       scheduledDate: new Date().toISOString().split("T")[0],
@@ -1707,6 +2426,86 @@ app.post("/api/documents/:id/pay", authenticateToken, async (req, res) => {
     res.json(updated);
   } catch (err) {
     res.status(500).json({ error: "Database update failure", details: err.message });
+  }
+});
+
+// Route to safely reprocess/re-extract an existing document without re-uploading
+app.post("/api/documents/:id/reprocess", authenticateToken, async (req, res) => {
+  try {
+    const doc = await db.getDocument(req.params.id);
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    if (doc.userId !== req.user.id) {
+      return res.status(403).json({ error: "Access Denied: You do not own this document." });
+    }
+    if (!doc.originalFile) {
+      return res.status(400).json({ error: "Original file content is not available for reprocessing." });
+    }
+
+    const buffer = Buffer.from(doc.originalFile, "base64");
+    const isText = doc.mimeType === "text/plain";
+    const filePart = isText ? buffer.toString("utf8") : bufferToGenerativePart(buffer, doc.mimeType);
+
+    const targetType = (doc.documentType === "other" || !doc.documentType) ? "invoice" : doc.documentType;
+    let selectedSchema = invoiceSchema;
+    let extractionPrompt = `Analyze this Invoice document. Write a clear summary of its contents. Suggest 2-3 logical next actions. Recommend department routing.
+Extract all invoice parameters (vendor, customerName, invoiceNumber, date, dueDate, subtotal, grossSubtotal, netTaxableSubtotal, tax, cgst, sgst, igst, vat, salesTax, otherTaxes, taxRates, discount, shipping, freight, otherCharges, roundOff, totalAmount, amountPaid, balanceDue, paymentStatus, currency, gstNumber, paymentTerms, email, phone, poNumber, hsnSac, lineItems).
+For missing fields, set "value" to null.`;
+
+    if (targetType === "receipt") {
+      selectedSchema = receiptSchema;
+      extractionPrompt = `Analyze this Receipt document. Extract merchantName, date, totalAmount, taxAmount, paymentMethod.`;
+    }
+
+    const extractionRes = await generateWithRetryAndFallback(genAI, {
+      primaryModel: "gemini-3.8-flash",
+      fallbackModel: "gemini-3.5-flash",
+      contents: [extractionPrompt, filePart],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: selectedSchema
+      },
+      stageName: "ReprocessExtraction"
+    });
+
+    let cleanText = extractionRes.text.trim();
+    if (cleanText.startsWith("```")) {
+      const lines = cleanText.split("\n");
+      if (lines[0].startsWith("```")) lines.shift();
+      if (lines[lines.length - 1].startsWith("```")) lines.pop();
+      cleanText = lines.join("\n").trim();
+    }
+    let analysisResult;
+    try {
+      analysisResult = JSON.parse(cleanText);
+    } catch (_) {
+      const firstBrace = cleanText.indexOf("{");
+      const lastBrace = cleanText.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        analysisResult = JSON.parse(cleanText.substring(firstBrace, lastBrace + 1));
+      }
+    }
+
+    if (!analysisResult) {
+      return res.status(422).json({ error: "AI Response Parsing Failure during reprocessing." });
+    }
+
+    analysisResult.documentType = targetType;
+    if (targetType === "invoice" || targetType === "receipt") {
+      analysisResult.invoiceData = normalizeInvoiceData(analysisResult.invoiceData, analysisResult);
+    }
+
+    const updated = await db.updateDocument(doc.id, {
+      documentType: targetType,
+      summary: (analysisResult.summary || doc.summary),
+      invoiceData: analysisResult.invoiceData || doc.invoiceData,
+      modelUsed: extractionRes.modelUsed,
+      confidence: analysisResult.confidence || doc.confidence
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("Reprocessing failed:", err);
+    res.status(500).json({ error: "Failed to reprocess document", details: err.message });
   }
 });
 
@@ -1918,6 +2717,21 @@ setInterval(async () => {
 }, 24 * 60 * 60 * 1000);
 
 // Start the server
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+let server;
+if (process.env.NODE_ENV !== 'test' && require.main === module) {
+  server = app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = {
+  app,
+  server,
+  generateWithRetryAndFallback,
+  normalizeInvoiceData,
+  parseNumeric,
+  parseString,
+  getRawField,
+  normalizeField,
+  normalizeCurrencyCode
+};

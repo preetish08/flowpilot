@@ -74,6 +74,7 @@ class Database {
         isDuplicate INTEGER DEFAULT 0,
         amountMismatch INTEGER DEFAULT 0,
         missingGst INTEGER DEFAULT 0,
+        modelUsed TEXT,
         FOREIGN KEY(userId) REFERENCES Users(id)
       )`);
 
@@ -103,11 +104,40 @@ class Database {
         FOREIGN KEY(documentId) REFERENCES Documents(id) ON DELETE CASCADE
       )`);
 
+      // Migration helper: safely adds a column to an existing table.
+      // Ignores expected "duplicate column name" if already present, but logs unexpected errors.
+      const safeAddColumn = (tableName, columnName, columnType) => {
+        db.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`, (err) => {
+          if (err) {
+            const msg = (err.message || "").toLowerCase();
+            if (msg.includes("duplicate column name")) {
+              return; // Expected: column already exists
+            }
+            console.error(`[SQLite Migration Error] Failed to add column "${columnName}" to table "${tableName}":`, err.message);
+          }
+        });
+      };
+
       // Ensure new columns are present if the table was created under an older version
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN reminderType TEXT`, () => { });
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN scheduledDate TEXT`, () => { });
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN status TEXT`, () => { });
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN errorMessage TEXT`, () => { });
+      safeAddColumn("Documents", "currency", "TEXT");
+      safeAddColumn("EmailLogs", "reminderType", "TEXT");
+      safeAddColumn("EmailLogs", "scheduledDate", "TEXT");
+      safeAddColumn("EmailLogs", "status", "TEXT");
+      safeAddColumn("EmailLogs", "errorMessage", "TEXT");
+
+      // Backward-compatible migration: backfill currency for existing documents if missing
+      db.all("SELECT id, invoiceData FROM Documents WHERE currency IS NULL AND invoiceData IS NOT NULL", (err, rows) => {
+        if (err || !rows) return;
+        for (const r of rows) {
+          try {
+            const inv = JSON.parse(r.invoiceData);
+            const c = inv && inv.currency && (typeof inv.currency === 'object' ? inv.currency.value : inv.currency);
+            if (c) {
+              db.run("UPDATE Documents SET currency = ? WHERE id = ?", [c, r.id]);
+            }
+          } catch (_) {}
+        }
+      });
 
       // Create ReminderHistory table
       db.run(`CREATE TABLE IF NOT EXISTS ReminderHistory (
@@ -142,26 +172,53 @@ class Database {
       db.run(`INSERT OR IGNORE INTO Settings (key, value) VALUES ('threshold_INR', '100000')`);
 
       // Ensure columns exist in respective tables for data isolation and idempotency
-      db.run(`ALTER TABLE Documents ADD COLUMN userId TEXT`, () => { });
-      db.run(`ALTER TABLE EmailLogs ADD COLUMN userId TEXT`, () => { });
-      db.run(`ALTER TABLE ReminderHistory ADD COLUMN userId TEXT`, () => { });
-      db.run(`ALTER TABLE ReminderHistory ADD COLUMN scheduledDate TEXT`, () => { });
-      db.run(`ALTER TABLE Users ADD COLUMN fullName TEXT`, () => { });
-      db.run(`ALTER TABLE Users ADD COLUMN companyName TEXT`, () => { });
-      db.run(`ALTER TABLE Users ADD COLUMN passwordHash TEXT`, () => { });
-      db.run(`ALTER TABLE Users ADD COLUMN resetTokenHash TEXT`, () => { });
-      db.run(`ALTER TABLE Users ADD COLUMN resetTokenExpiry INTEGER`, () => { });
+      safeAddColumn("Documents", "userId", "TEXT");
+      safeAddColumn("Documents", "modelUsed", "TEXT");
+      safeAddColumn("EmailLogs", "userId", "TEXT");
+      safeAddColumn("ReminderHistory", "userId", "TEXT");
+      safeAddColumn("ReminderHistory", "scheduledDate", "TEXT");
+      safeAddColumn("Users", "fullName", "TEXT");
+      safeAddColumn("Users", "companyName", "TEXT");
+      safeAddColumn("Users", "passwordHash", "TEXT");
+      safeAddColumn("Users", "resetTokenHash", "TEXT");
+      safeAddColumn("Users", "resetTokenExpiry", "INTEGER");
     });
   }
 
   // Map database row back to structured UI-ready document object
   mapRowToDoc(row) {
     if (!row) return null;
+    let invoiceData = null;
+    if (row.invoiceData) {
+      try {
+        invoiceData = JSON.parse(row.invoiceData);
+      } catch (e) {
+        console.error("Failed to parse invoiceData:", e);
+      }
+    }
+    // Fallback: If invoiceData is null or empty, but extractedJson exists
+    if (!invoiceData && row.extractedJson) {
+      try {
+        const parsed = JSON.parse(row.extractedJson);
+        if (parsed && typeof parsed === 'object') {
+          if (parsed.invoiceData && typeof parsed.invoiceData === 'object') {
+            invoiceData = parsed.invoiceData;
+          } else if (parsed.invoice_number || parsed.invoiceNumber || parsed.totalAmount || parsed.from || parsed.bill_to) {
+            invoiceData = parsed;
+          }
+        }
+      } catch (_) {}
+    }
+
     return {
       id: row.id,
       fileName: row.fileName,
       fileSize: row.fileSize,
       mimeType: row.mimeType,
+      originalFile: row.originalFile || null,
+      extractedJson: row.extractedJson ? (() => {
+        try { return JSON.parse(row.extractedJson); } catch (_) { return null; }
+      })() : null,
       uploadedAt: row.uploadedAt,
       status: row.status,
       isDuplicate: !!row.isDuplicate,
@@ -170,18 +227,40 @@ class Database {
       documentType: row.documentType,
       confidence: row.confidence,
       summary: row.summary,
-      ocrVerification: row.ocrVerification ? JSON.parse(row.ocrVerification) : null,
-      recommendedRouting: row.recommendedRouting ? JSON.parse(row.recommendedRouting) : null,
-      invoiceData: row.invoiceData ? JSON.parse(row.invoiceData) : null,
-      contractData: row.contractData ? JSON.parse(row.contractData) : null,
-      resumeData: row.resumeData ? JSON.parse(row.resumeData) : null,
-      sopData: row.sopData ? JSON.parse(row.sopData) : null,
-      policyData: row.policyData ? JSON.parse(row.policyData) : null,
-      purchaseOrderData: row.purchaseOrderData ? JSON.parse(row.purchaseOrderData) : null,
-      bankStatementData: row.bankStatementData ? JSON.parse(row.bankStatementData) : null,
-      suggestedActions: row.suggestedActions ? JSON.parse(row.suggestedActions) : [],
-      keyDates: row.keyDates ? JSON.parse(row.keyDates) : [],
-      userId: row.userId ? String(row.userId) : null
+      ocrVerification: row.ocrVerification ? (() => {
+        try { return JSON.parse(row.ocrVerification); } catch (_) { return null; }
+      })() : null,
+      recommendedRouting: row.recommendedRouting ? (() => {
+        try { return JSON.parse(row.recommendedRouting); } catch (_) { return null; }
+      })() : null,
+      invoiceData,
+      contractData: row.contractData ? (() => {
+        try { return JSON.parse(row.contractData); } catch (_) { return null; }
+      })() : null,
+      resumeData: row.resumeData ? (() => {
+        try { return JSON.parse(row.resumeData); } catch (_) { return null; }
+      })() : null,
+      sopData: row.sopData ? (() => {
+        try { return JSON.parse(row.sopData); } catch (_) { return null; }
+      })() : null,
+      policyData: row.policyData ? (() => {
+        try { return JSON.parse(row.policyData); } catch (_) { return null; }
+      })() : null,
+      purchaseOrderData: row.purchaseOrderData ? (() => {
+        try { return JSON.parse(row.purchaseOrderData); } catch (_) { return null; }
+      })() : null,
+      bankStatementData: row.bankStatementData ? (() => {
+        try { return JSON.parse(row.bankStatementData); } catch (_) { return null; }
+      })() : null,
+      suggestedActions: row.suggestedActions ? (() => {
+        try { return JSON.parse(row.suggestedActions); } catch (_) { return []; }
+      })() : [],
+      keyDates: row.keyDates ? (() => {
+        try { return JSON.parse(row.keyDates); } catch (_) { return []; }
+      })() : [],
+      userId: row.userId ? String(row.userId) : null,
+      modelUsed: row.modelUsed || "gemini-3.8-flash",
+      currency: row.currency || (invoiceData && invoiceData.currency && (typeof invoiceData.currency === 'object' ? invoiceData.currency.value : invoiceData.currency)) || null
     };
   }
 
@@ -201,13 +280,15 @@ class Database {
   }
 
   async addDocument(doc) {
+    const docCurrency = doc.currency || (doc.invoiceData && doc.invoiceData.currency && (typeof doc.invoiceData.currency === 'object' ? doc.invoiceData.currency.value : doc.invoiceData.currency)) || null;
+
     await dbRun(`INSERT INTO Documents (
       id, fileName, fileSize, mimeType, originalFile, extractedJson,
       documentType, confidence, uploadedAt, status, summary,
       ocrVerification, recommendedRouting, invoiceData, contractData,
       resumeData, sopData, policyData, purchaseOrderData, bankStatementData,
-      suggestedActions, keyDates, isDuplicate, amountMismatch, missingGst, userId
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      suggestedActions, keyDates, isDuplicate, amountMismatch, missingGst, userId, modelUsed, currency
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       doc.id,
       doc.fileName,
       doc.fileSize,
@@ -233,7 +314,9 @@ class Database {
       doc.isDuplicate ? 1 : 0,
       doc.amountMismatch ? 1 : 0,
       doc.missingGst ? 1 : 0,
-      doc.userId || null
+      doc.userId || null,
+      doc.modelUsed || "gemini-3.8-flash",
+      docCurrency
     ]);
 
     // Relational Extraction: Populate DocumentFields
@@ -260,6 +343,7 @@ class Database {
     if (!existing) return null;
 
     const merged = { ...existing, ...updatedFields };
+    const docCurrency = merged.currency || (merged.invoiceData && merged.invoiceData.currency && (typeof merged.invoiceData.currency === 'object' ? merged.invoiceData.currency.value : merged.invoiceData.currency)) || null;
 
     await dbRun(`UPDATE Documents SET
       status = ?,
@@ -267,7 +351,20 @@ class Database {
       amountMismatch = ?,
       missingGst = ?,
       suggestedActions = ?,
-      keyDates = ?
+      keyDates = ?,
+      summary = ?,
+      invoiceData = ?,
+      contractData = ?,
+      resumeData = ?,
+      sopData = ?,
+      policyData = ?,
+      purchaseOrderData = ?,
+      bankStatementData = ?,
+      documentType = ?,
+      confidence = ?,
+      modelUsed = ?,
+      extractedJson = ?,
+      currency = ?
       WHERE id = ?`, [
       merged.status,
       merged.isDuplicate ? 1 : 0,
@@ -275,6 +372,19 @@ class Database {
       merged.missingGst ? 1 : 0,
       JSON.stringify(merged.suggestedActions),
       JSON.stringify(merged.keyDates),
+      merged.summary,
+      merged.invoiceData ? JSON.stringify(merged.invoiceData) : null,
+      merged.contractData ? JSON.stringify(merged.contractData) : null,
+      merged.resumeData ? JSON.stringify(merged.resumeData) : null,
+      merged.sopData ? JSON.stringify(merged.sopData) : null,
+      merged.policyData ? JSON.stringify(merged.policyData) : null,
+      merged.purchaseOrderData ? JSON.stringify(merged.purchaseOrderData) : null,
+      merged.bankStatementData ? JSON.stringify(merged.bankStatementData) : null,
+      merged.documentType,
+      merged.confidence,
+      merged.modelUsed || "gemini-3.8-flash",
+      merged.extractedJson ? (typeof merged.extractedJson === 'string' ? merged.extractedJson : JSON.stringify(merged.extractedJson)) : null,
+      docCurrency,
       id
     ]);
 
